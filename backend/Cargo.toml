@@ -7,3 +7,4 @@ edition = "2024"
 sqlx = { version = "0.8", features = [ "runtime-tokio", "tls-native-tls" ] }
 tokio = { version = "1.49.0", features = ["full"] }
 hickory-proto = "0.25.2"
+thiserror = "2"
