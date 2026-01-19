@@ -4,7 +4,6 @@ use tokio::net::{TcpListener, UdpSocket};
 
 use crate::listener::ListenerConfig;
 
-
 #[derive(thiserror::Error, Debug)]
 pub enum ListenerError {
     #[error("failed to bind udp (addr: {0}): {1}")]

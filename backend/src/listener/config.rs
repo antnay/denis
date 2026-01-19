@@ -4,7 +4,7 @@ pub struct ListenerConfig {
     pub bind_addr: SocketAddr,
     pub tcp_timeout: Duration,
     pub max_tcp_connections: usize,
-    pub udp_buffer_size: usize
+    pub udp_buffer_size: usize,
 }
 
 impl Default for ListenerConfig {

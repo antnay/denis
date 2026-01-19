@@ -1,11 +1,9 @@
-
 use std::{iter::Inspect, net::IpAddr, time::Instant};
 
 use tokio::sync::mpsc;
 
 #[derive(thiserror::Error, Debug)]
-pub enum HandlerError {
-}
+pub enum HandlerError {}
 
 pub struct QueryHandler {
     resolver: Resolver,
@@ -15,7 +13,8 @@ pub struct QueryHandler {
 impl QueryHandler {
     pub fn new(resolver: Resolver, logger_tx: mpsc::Sender<Event>) -> Self {
         Self {
-            resolver, logger_tx
+            resolver,
+            logger_tx,
         }
     }
 
@@ -25,7 +24,7 @@ impl QueryHandler {
         // blocklist
         // cache
         // upstream
-        
+
         // record statistics
         // log
     }
