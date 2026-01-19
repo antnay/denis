@@ -1,6 +1,5 @@
-mod listener;
 mod config;
+mod listener;
 
-pub use listener::Listener;
 pub use config::ListenerConfig;
-
+pub use listener::{Listener, ListenerError};
