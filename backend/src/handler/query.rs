@@ -1,19 +1,20 @@
 use std::{net::IpAddr, time::Instant};
 
-use tokio::sync::mpsc;
+// use tokio::sync::mpsc;
 
 use crate::handler::resolver::Resolver;
 
 #[derive(thiserror::Error, Debug)]
 pub enum HandlerError {
-    #[error("failed to parse query: {0}")]
-    Parse(String),
     #[error("resolver error: {0}")]
     Resolver(#[from] crate::handler::resolver::ResolverError),
 }
 
-pub enum QueryType {
-    A,
+pub struct Query {
+    pub id: u16,
+    pub name: String,
+    pub query_type: hickory_proto::rr::RecordType,
+    pub raw: Vec<u8>,
 }
 
 pub struct QueryHandler {
@@ -36,18 +37,11 @@ impl QueryHandler {
         println!("incoming client: {}", client);
         let begin = Instant::now();
         let query = self.resolver.parse(data).await?;
-        self.resolver.resolve(&query).await?;
+        let res = self.resolver.resolve(&query).await?;
         let delta = begin.elapsed();
         println!("query time: {:?}", delta);
         // record statistics
         // log
-        Ok("response".as_bytes().to_vec())
+        Ok(res.raw)
     }
-}
-
-pub struct Query {
-    pub id: u16,
-    pub name: String,
-    pub query_type: QueryType,
-    pub raw: Vec<u8>,
 }

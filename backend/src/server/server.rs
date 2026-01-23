@@ -1,11 +1,15 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use hickory_proto::udp;
 use tokio::net::{TcpListener, UdpSocket};
 
-use crate::listener::ListenerConfig;
+use crate::{
+    handler::{self, QueryHandler},
+    server::ServerConfig,
+};
 
 #[derive(thiserror::Error, Debug)]
-pub enum ListenerError {
+pub enum ServerError {
     #[error("failed to bind udp (addr: {0}): {1}")]
     BindUdp(String, std::io::Error),
     #[error("failed to bind tcp (addr: {0}): {1}")]
@@ -16,43 +20,46 @@ pub enum ListenerError {
     Unknown,
 }
 
-pub struct Listener {
-    config: ListenerConfig,
+pub struct Server {
+    config: ServerConfig,
     handler: Arc<QueryHandler>,
 }
 
-impl Listener {
-    pub fn new(config: ListenerConfig, handler: Arc<QueryHandler>) -> Self {
+impl Server {
+    pub fn new(config: ServerConfig, handler: Arc<QueryHandler>) -> Self {
         Self { config, handler }
     }
 
-    pub async fn run(&self) -> Result<(), ListenerError> {
+    pub async fn run(&self) -> Result<(), ServerError> {
         let udp = UdpSocket::bind(self.config.bind_addr)
             .await
-            .map_err(|e| ListenerError::BindUdp(self.config.bind_addr.to_string(), e))?;
+            .map_err(|e| ServerError::BindUdp(self.config.bind_addr.to_string(), e))?;
         let tcp = TcpListener::bind(self.config.bind_addr)
             .await
-            .map_err(|e| ListenerError::BindTcp(self.config.bind_addr.to_string(), e))?;
+            .map_err(|e| ServerError::BindTcp(self.config.bind_addr.to_string(), e))?;
 
+        println!("server running: {}", self.config.bind_addr);
         tokio::select! {
             r = self.serve_udp(udp) => {r},
-            r = self.serve_tcp(tcp) => {r},
+            // r = self.serve_tcp(tcp) => {r},
         }
     }
 
-    async fn serve_udp(&self, udp_socket: UdpSocket) -> Result<(), ListenerError> {
+    async fn serve_udp(&self, udp_socket: UdpSocket) -> Result<(), ServerError> {
+        println!("udp server running");
         let socket = Arc::new(udp_socket);
         let mut buf = vec![0u8; self.config.udp_buffer_size];
         loop {
             let (len, src) = socket
                 .recv_from(&mut buf)
                 .await
-                .map_err(|e| ListenerError::Socket(e))?;
+                .map_err(|e| ServerError::Socket(e))?;
 
             let handler = Arc::clone(&self.handler);
             let socket = Arc::clone(&socket);
             let data = buf[..len].to_vec();
 
+            println!("serving udp:\ndata:{:?} | src: {}", data, src);
             tokio::spawn(async move {
                 Self::handle_udp(socket, handler, data, src).await;
             });
@@ -65,9 +72,19 @@ impl Listener {
         data: Vec<u8>,
         src: SocketAddr,
     ) {
+        match handler.handle(&data, src.ip()).await {
+            Ok(res) => {
+                if let Err(e) = socket.send_to(&res, src).await {
+                    println!("cannot send udp: {}", e);
+                }
+            }
+            Err(e) => {
+                println!("query handling failed: {}", e);
+            }
+        }
     }
 
-    async fn serve_tcp(&self, socket: TcpListener) -> Result<(), ListenerError> {
+    async fn serve_tcp(&self, socket: TcpListener) -> Result<(), ServerError> {
         todo!("serve tcp")
     }
 }

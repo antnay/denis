@@ -1,13 +1,8 @@
-use std::fmt::LowerHex;
-
-use clap::builder::Str;
-
 use crate::handler::UpstreamError;
 use crate::handler::UpstreamPool;
 use crate::handler::UpstreamResponse;
 
 use crate::handler::query::Query;
-use crate::handler::query::QueryType;
 
 const QNAME_START: usize = 12;
 
@@ -15,8 +10,6 @@ const QNAME_START: usize = 12;
 pub enum ResolverError {
     #[error("upstream error: {0}")]
     Upstream(UpstreamError),
-    #[error("{1} parsing error: {0}")]
-    UTF8ToString(std::string::FromUtf8Error, String),
 }
 
 impl From<UpstreamError> for ResolverError {
@@ -43,18 +36,20 @@ impl Resolver {
 
     pub async fn parse(&self, data: &[u8]) -> Result<Query, ResolverError> {
         let id = u16::from_be_bytes([data[0], data[1]]);
-        let qname = self.parse_question(data);
+        let (qname, qtype) = self.parse_question(data);
 
         let qname_str = String::from_utf8_lossy(&qname);
+
         if cfg!(debug_assertions) {
             println!("qname bytes: {:?}", qname);
             println!("qname string: {}", qname_str.to_string());
+            println!("qype string: {:02x}", qtype);
         }
 
         Ok(Query {
             id,
             name: qname_str.to_string(),
-            query_type: QueryType::A,
+            query_type: hickory_proto::rr::RecordType::from(qtype),
             raw: data.to_vec(),
         })
     }
@@ -65,7 +60,7 @@ impl Resolver {
     // }
 
     #[inline]
-    fn parse_question(&self, data: &[u8]) -> Vec<u8> {
+    fn parse_question(&self, data: &[u8]) -> (Vec<u8>, u16) {
         let mut indx = QNAME_START;
         let mut len = 0;
         let mut state = ParseState::Length;
@@ -81,13 +76,14 @@ impl Resolver {
                 ParseState::Scan => {
                     let stop = indx + len as usize;
                     for i in indx..stop {
-                        println!(
-                            "indx:{} | i: {} | data: '{}' - {} | len: {}",
-                            indx, i, data[i as usize] as char, data[i as usize], len
-                        );
+                        // println!(
+                        //     "indx:{} | i: {} | data: '{}' - {} | len: {}",
+                        //     indx, i, data[i as usize] as char, data[i as usize], len
+                        // );
                         buf.push(data[i as usize]);
                     }
                     indx += len as usize;
+                    // fixme: easy branchless
                     if data[indx] != 0x00 {
                         buf.push(46);
                     }
@@ -95,7 +91,7 @@ impl Resolver {
                 }
             }
         }
-        buf
+        (buf, u16::from_be_bytes([data[indx + 1], data[indx + 2]]))
     }
 
     // #[inline]
