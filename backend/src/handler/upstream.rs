@@ -61,7 +61,6 @@ impl UpstreamResponse {
         }
     }
     pub fn nxdomain(query: &Query) -> Self {
-        debug!("query {:#?}", query);
         let response_len = query.answer_offset;
         let mut raw = query.raw[..response_len.min(query.raw.len())].to_vec();
 

@@ -1,7 +1,8 @@
 use deadpool_redis::{
     Pool, PoolError,
-    redis::{RedisError, cmd},
+    redis::{RedisError, cmd, pipe},
 };
+use ftlog::{debug, error};
 
 use crate::handler::Query;
 
@@ -41,21 +42,40 @@ impl Cache {
         Ok(res)
     }
 
-    pub async fn add_query(
-        &self,
-        query: &Query,
-        response: &[u8],
-        ttl: u32,
-    ) -> Result<(), CacheError> {
-        let mut conn = self.pool.get().await?;
+    pub async fn add_query(&self, query: &Query, response: &[u8], ttl: u32) {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| error!("could not add query {}", e))
+            .unwrap();
+
         let key = self.query_key(&query);
-        cmd("SETEX")
+        let _ = cmd("SETEX")
             .arg(&key)
             .arg(ttl)
             .arg(response)
             .query_async::<()>(&mut conn)
             .await
-            .map_err(|e| CacheError::Set(e, key))
+            .map_err(|e| error!("could not add query {}", e));
+    }
+
+    pub async fn check_get(&self, query: &Query) -> Result<(bool, Option<Vec<u8>>), CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| error!("could not add query {}", e))
+            .unwrap();
+        let key = self.query_key(&query);
+        let (is_blocked, res) = pipe()
+            .sismember("block:domains", &query.name)
+            .get(&key)
+            .query_async::<(bool, Option<Vec<u8>>)>(&mut conn)
+            .await
+            .map_err(|e| CacheError::Get(e, key))?;
+        debug!("blocked: {}", is_blocked);
+        Ok((is_blocked, res))
     }
 
     fn query_key(&self, query: &Query) -> String {

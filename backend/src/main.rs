@@ -38,6 +38,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resolver = Resolver::new(blocklist.clone(), cache.clone(), upstream);
     let handler = Arc::new(QueryHandler::new(resolver));
 
+    // todo: get rid of me
+    blocklist.add_block_domain("ads.google.com").await?;
+    blocklist.add_block_domain("doubleclick.net").await?;
+    blocklist.add_block_domain("tracking.facebook.com").await?;
+    blocklist.add_block_domain("analytics.google.com").await?;
+    blocklist.add_block_domain("ad.doubleclick.net").await?;
+
     let mut config = ServerConfig::default();
     config.bind_addr = cli.bind.parse()?;
     let server = Server::new(config, handler);
