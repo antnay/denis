@@ -125,31 +125,40 @@ impl Resolver {
         u16::from_be_bytes([data[idx + 1], data[idx + 2]])
     }
 
-    #[inline]
-    fn parse_ttl(&self, data: &[u8], mut idx: usize) -> u32 {
-        idx += 6;
-        u32::from_be_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]])
-    }
-
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, ResolverError> {
         if self.blocklist.is_blocked(query).await? {
             debug!("blocked: {}", query.name);
-            return Ok(UpstreamResponse::nxdomain(query));
-        }
+                return Ok(UpstreamResponse::nxdomain(query));
+            }
 
         if let Some(cached) = self.cache.get_query(query).await? {
             debug!("cached: {}", query.name);
             return Ok(UpstreamResponse::cached(query, cached));
+            }
+
+                debug!("upstream: {}", query.name);
+                let response = self.upstream.resolve(query).await?;
+
+                if response.code == ResponseCode::NoError {
+                    let cache = self.cache.clone();
+                    let query_clone = query.clone();
+                    let raw = response.raw.clone();
+                    let answer_offset = query.answer_offset;
+
+                    tokio::spawn(async move {
+                        let ttl = Resolver::parse_ttl(&raw, answer_offset);
+                        let _ = cache.add_query(&query_clone, &raw, ttl).await;
+                    });
+                }
+
+                Ok(response)
+            }
         }
+    }
 
-        debug!("upstream: {}", query.name);
-        let response = self.upstream.resolve(query).await?;
-
-        if response.code == ResponseCode::NoError {
-            let ttl = self.parse_ttl(&response.raw, query.answer_offset);
-            self.cache.add_query(query, &response.raw, ttl).await?;
-        }
-
-        Ok(response)
+    #[inline]
+    fn parse_ttl(data: &[u8], mut idx: usize) -> u32 {
+        idx += 6;
+        u32::from_be_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]])
     }
 }

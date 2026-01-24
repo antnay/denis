@@ -12,7 +12,7 @@ pub enum HandlerError {
     Resolver(#[from] crate::handler::resolver::ResolverError),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Query {
     pub id: u16,
     pub name: String,
@@ -47,7 +47,6 @@ impl QueryHandler {
         let delta = begin.elapsed();
         info!("query time: {:?}", delta);
         // record statistics
-        // log
         Ok(res.raw)
     }
 }
