@@ -1,5 +1,6 @@
-use std::{net::SocketAddr, string, time::Duration, vec};
+use std::{net::SocketAddr, time::Duration, vec};
 
+use ftlog::{debug, trace};
 use hickory_proto::op::ResponseCode;
 use tokio::{
     net::UdpSocket,
@@ -29,6 +30,7 @@ impl Default for UpstreamConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct UpstreamResponse {
     pub code: ResponseCode,
     pub cached: bool,
@@ -76,7 +78,8 @@ impl UpstreamPool {
         let mut err = None;
         for attempt in 0..5 {
             let server = &self.config.servers[attempt % self.config.servers.len()];
-            println!("querying server: {}", server);
+            debug!("using server: {}", server);
+            // println!("querying server: {}", server);
             match self.query_dns(server, query).await {
                 Ok(response) => return Ok(response),
                 Err(e) => err = Some(e),
@@ -114,13 +117,13 @@ impl UpstreamPool {
         } else {
             ResponseCode::ServFail
         };
-        println!("response bytes: {}", String::from_utf8_lossy(&bytes));
-        println!("response bytes: {:?}", bytes);
-        println!(
-            "response code: {}\nresponse bytes len: {}",
-            code,
-            bytes.len()
-        );
+        // println!("response bytes: {}", String::from_utf8_lossy(&bytes));
+        // println!("response bytes: {:?}", bytes);
+        // println!(
+        //     "response code: {}\nresponse bytes len: {}",
+        //     code,
+        //     bytes.len()
+        // );
 
         Ok(UpstreamResponse {
             code: code,

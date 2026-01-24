@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use ftlog::{error, info, trace};
 use hickory_proto::udp;
 use tokio::net::{TcpListener, UdpSocket};
 
@@ -38,7 +39,7 @@ impl Server {
             .await
             .map_err(|e| ServerError::BindTcp(self.config.bind_addr.to_string(), e))?;
 
-        println!("server running: {}", self.config.bind_addr);
+        info!("server running: {}", self.config.bind_addr);
         tokio::select! {
             r = self.serve_udp(udp) => {r},
             // r = self.serve_tcp(tcp) => {r},
@@ -46,7 +47,7 @@ impl Server {
     }
 
     async fn serve_udp(&self, udp_socket: UdpSocket) -> Result<(), ServerError> {
-        println!("udp server running");
+        info!("udp server running");
         let socket = Arc::new(udp_socket);
         let mut buf = vec![0u8; self.config.udp_buffer_size];
         loop {
@@ -59,7 +60,6 @@ impl Server {
             let socket = Arc::clone(&socket);
             let data = buf[..len].to_vec();
 
-            println!("serving udp:\ndata:{:?} | src: {}", data, src);
             tokio::spawn(async move {
                 Self::handle_udp(socket, handler, data, src).await;
             });
@@ -75,11 +75,11 @@ impl Server {
         match handler.handle(&data, src.ip()).await {
             Ok(res) => {
                 if let Err(e) = socket.send_to(&res, src).await {
-                    println!("cannot send udp: {}", e);
+                    error!("cannot send udp: {}", e);
                 }
             }
             Err(e) => {
-                println!("query handling failed: {}", e);
+                error!("query handling failed: {}", e);
             }
         }
     }
