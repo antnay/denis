@@ -1,11 +1,12 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use ftlog::debug;
-use ftlog::info;
 use hickory_proto::op::ResponseCode;
 
+use crate::cache::Blocklist;
+use crate::cache::BlocklistError;
+use crate::cache::Cache;
 use crate::cache::CacheError;
-use crate::cache::RdsCache;
 use crate::handler::UpstreamError;
 use crate::handler::UpstreamPool;
 use crate::handler::UpstreamResponse;
@@ -20,6 +21,8 @@ pub enum ResolverError {
     Upstream(UpstreamError),
     #[error("cache error: {0}")]
     Cache(CacheError),
+    #[error("blocklist error: {0}")]
+    Blocklist(BlocklistError),
 }
 
 impl From<UpstreamError> for ResolverError {
@@ -34,24 +37,34 @@ impl From<CacheError> for ResolverError {
     }
 }
 
+impl From<BlocklistError> for ResolverError {
+    fn from(err: BlocklistError) -> Self {
+        ResolverError::Blocklist(err)
+    }
+}
+
 enum ParseState {
     Length,
     Scan,
 }
 
 pub struct Resolver {
-    cache: RdsCache,
-    // blocklist: Arc<Blocklist>
+    blocklist: Arc<Blocklist>,
+    cache: Arc<Cache>,
     upstream: UpstreamPool,
 }
 
 impl Resolver {
-    pub fn new(cache: RdsCache, upstream: UpstreamPool) -> Self {
-        Self { cache, upstream }
+    pub fn new(blocklist: Arc<Blocklist>, cache: Arc<Cache>, upstream: UpstreamPool) -> Self {
+        Self {
+            blocklist,
+            cache,
+            upstream,
+        }
     }
 
     pub async fn parse(&self, data: &[u8]) -> Result<Query, ResolverError> {
-        let id = u16::from_be_bytes([data[0], data[1]]);
+        let id = self.parse_header(data);
         let (qname, idx) = self.parse_question(data);
         let qtype = self.parse_qtype(data, idx);
 
@@ -70,10 +83,10 @@ impl Resolver {
         })
     }
 
-    // #[inline]
-    // async fn parse_header(&self, data: &[u8]) {
-    //     let id = u16::from_be_bytes([data[0], data[1]]);
-    // }
+    #[inline]
+    fn parse_header(&self, data: &[u8]) -> u16 {
+        u16::from_be_bytes([data[0], data[1]])
+    }
 
     // Returns a Vec<u8> containing the dns packet qname and pointer to the last index of qname
     #[inline]
@@ -119,27 +132,24 @@ impl Resolver {
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, ResolverError> {
-        // blocklist
-        if let Some(mut cached) = self.cache.get_query(&query).await? {
-            debug!("using cache");
-            if cached.len() >= 2 {
-                cached[0] = query.raw[0];
-                cached[1] = query.raw[1];
-            }
-            return Ok(UpstreamResponse {
-                code: ResponseCode::NoError,
-                cached: true,
-                blocked: false,
-                raw: cached,
-            });
+        if self.blocklist.is_blocked(query).await? {
+            debug!("blocked: {}", query.name);
+            return Ok(UpstreamResponse::nxdomain(query));
         }
 
-        debug!("using upstream");
-        let res = self.upstream.resolve(query).await?;
-        if res.code == ResponseCode::NoError {
-            let ttl = self.parse_ttl(&res.raw, query.answer_offset);
-            self.cache.add_query(&query, &res.raw, ttl).await?;
+        if let Some(cached) = self.cache.get_query(query).await? {
+            debug!("cached: {}", query.name);
+            return Ok(UpstreamResponse::cached(query, cached));
         }
-        Ok(res)
+
+        debug!("upstream: {}", query.name);
+        let response = self.upstream.resolve(query).await?;
+
+        if response.code == ResponseCode::NoError {
+            let ttl = self.parse_ttl(&response.raw, query.answer_offset);
+            self.cache.add_query(query, &response.raw, ttl).await?;
+        }
+
+        Ok(response)
     }
 }

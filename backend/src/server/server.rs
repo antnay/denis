@@ -1,13 +1,9 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use ftlog::{error, info, trace};
-use hickory_proto::udp;
+use ftlog::{error, info};
 use tokio::net::{TcpListener, UdpSocket};
 
-use crate::{
-    handler::{self, QueryHandler},
-    server::ServerConfig,
-};
+use crate::{handler::QueryHandler, server::ServerConfig};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
@@ -35,7 +31,7 @@ impl Server {
         let udp = UdpSocket::bind(self.config.bind_addr)
             .await
             .map_err(|e| ServerError::BindUdp(self.config.bind_addr.to_string(), e))?;
-        let tcp = TcpListener::bind(self.config.bind_addr)
+        let _tcp = TcpListener::bind(self.config.bind_addr)
             .await
             .map_err(|e| ServerError::BindTcp(self.config.bind_addr.to_string(), e))?;
 

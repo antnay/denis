@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration, vec};
 
-use ftlog::{debug, trace};
+use ftlog::debug;
 use hickory_proto::op::ResponseCode;
 use tokio::{
     net::UdpSocket,
@@ -36,6 +36,54 @@ pub struct UpstreamResponse {
     pub cached: bool,
     pub blocked: bool,
     pub raw: Vec<u8>,
+}
+impl UpstreamResponse {
+    pub fn blocked() -> Self {
+        Self {
+            code: ResponseCode::NXDomain,
+            cached: false,
+            blocked: true,
+            raw: vec![],
+        }
+    }
+
+    pub fn cached(query: &Query, mut raw: Vec<u8>) -> Self {
+        if raw.len() >= 2 && query.raw.len() >= 2 {
+            raw[0] = query.raw[0];
+            raw[1] = query.raw[1];
+        }
+
+        Self {
+            code: ResponseCode::NoError,
+            cached: true,
+            blocked: false,
+            raw,
+        }
+    }
+    pub fn nxdomain(query: &Query) -> Self {
+        debug!("query {:#?}", query);
+        let response_len = query.answer_offset;
+        let mut raw = query.raw[..response_len.min(query.raw.len())].to_vec();
+
+        if raw.len() >= 12 {
+            let rd = raw[2] & 0x01;
+            raw[2] = 0x84 | rd;
+            raw[3] = 0x83;
+            raw[6] = 0x00;
+            raw[7] = 0x00;
+            raw[8] = 0x00;
+            raw[9] = 0x00;
+            raw[10] = 0x00;
+            raw[11] = 0x00;
+        }
+
+        Self {
+            code: ResponseCode::NXDomain,
+            cached: false,
+            blocked: true,
+            raw,
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -117,13 +165,6 @@ impl UpstreamPool {
         } else {
             ResponseCode::ServFail
         };
-        // println!("response bytes: {}", String::from_utf8_lossy(&bytes));
-        // println!("response bytes: {:?}", bytes);
-        // println!(
-        //     "response code: {}\nresponse bytes len: {}",
-        //     code,
-        //     bytes.len()
-        // );
 
         Ok(UpstreamResponse {
             code: code,

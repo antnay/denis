@@ -3,11 +3,12 @@ mod handler;
 mod server;
 
 use clap::Parser;
+use deadpool_redis::{Config, Runtime};
 use ftlog::{error, info};
 use std::sync::Arc;
 
 use crate::{
-    cache::{RdsCache, RedisCacheConfig},
+    cache::{Blocklist, Cache, RedisConfig},
     handler::{QueryHandler, Resolver, UpstreamConfig, UpstreamPool},
     server::{Server, ServerConfig},
 };
@@ -27,18 +28,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init()
         .unwrap();
 
-    let cache = RdsCache::new(RedisCacheConfig::default())?;
+    let def = RedisConfig::default();
+    let conf = Config::from_url(&def.url);
+    let pool = conf.create_pool(Some(Runtime::Tokio1))?;
+
+    let blocklist = Arc::new(Blocklist::new(pool.clone()));
+    let cache = Arc::new(Cache::new(pool.clone()));
     let upstream = UpstreamPool::new(UpstreamConfig::default());
-    let resolver = Resolver::new(cache, upstream);
+    let resolver = Resolver::new(blocklist.clone(), cache.clone(), upstream);
     let handler = Arc::new(QueryHandler::new(resolver));
 
     let mut config = ServerConfig::default();
     config.bind_addr = cli.bind.parse()?;
-
     let server = Server::new(config, handler);
-
     info!("Starting server on {}", cli.bind);
-
     if let Err(e) = server.run().await {
         error!("Server error: {}", e);
         std::process::exit(1);

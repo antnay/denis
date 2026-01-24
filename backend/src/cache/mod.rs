@@ -1,6 +1,7 @@
+mod blocklist;
 mod cache;
 mod config;
-mod rds;
 
-pub use cache::{CacheError, RdsCache};
-pub use config::RedisCacheConfig;
+pub use blocklist::{Blocklist, BlocklistError};
+pub use cache::{Cache, CacheError};
+pub use config::RedisConfig;

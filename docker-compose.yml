@@ -10,12 +10,22 @@ services:
   #   depends_on:
   #     - redis
 
-  redis:
-    image: redis:7-alpine
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+
+  dragonfly:
+    image: 'docker.dragonflydb.io/dragonflydb/dragonfly'
+    ulimits:
+      memlock: -1
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - dragonflydb_data:/data
 
 volumes:
-  redis_data:
+  # redis_data:
+  dragonflydb_data:
