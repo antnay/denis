@@ -1,10 +1,10 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
 use bytes::BytesMut;
-use ftlog::{error, info};
+use ftlog::{debug, error, info};
 use tokio::{
     net::{TcpListener, UdpSocket},
-    sync::mpsc,
+    sync::Mutex,
 };
 
 use crate::{handler::QueryHandler, server::ServerConfig};
@@ -17,18 +17,60 @@ pub enum ServerError {
     BindTcp(String, std::io::Error),
     #[error("socket error: {0}")]
     Socket(std::io::Error),
-    #[error("unknown server error")]
-    Unknown,
+    // #[error("unknown server error")]
+    // Unknown,
+}
+
+// todo: use disruspter
+#[derive(Debug)]
+pub struct BufferPool {
+    pool: Mutex<Vec<BytesMut>>,
+    buffer_size: usize,
+}
+
+impl BufferPool {
+    pub fn new(buffer_size: usize, initial_count: usize) -> Arc<Self> {
+        let mut pool = Vec::with_capacity(initial_count);
+        for _ in 0..initial_count {
+            pool.push(BytesMut::with_capacity(buffer_size));
+        }
+        Arc::new(Self {
+            pool: Mutex::new(pool),
+            buffer_size,
+        })
+    }
+
+    pub async fn get(&self) -> BytesMut {
+        self.pool
+            .lock()
+            .await
+            .pop()
+            .unwrap_or_else(|| BytesMut::with_capacity(self.buffer_size))
+    }
+
+    pub async fn put(&self, mut buf: BytesMut) {
+        buf.clear();
+        if buf.capacity() <= self.buffer_size * 2 {
+            self.pool.lock().await.push(buf);
+        }
+    }
 }
 
 pub struct Server {
     config: ServerConfig,
     handler: Arc<QueryHandler>,
+    buffer_pool: Arc<BufferPool>,
 }
 
 impl Server {
     pub fn new(config: ServerConfig, handler: Arc<QueryHandler>) -> Self {
-        Self { config, handler }
+        let buffer_pool = BufferPool::new(config.udp_buffer_size, config.udp_buffer_count);
+        debug!("buffer pool {:#?}", buffer_pool);
+        Self {
+            config,
+            handler,
+            buffer_pool,
+        }
     }
 
     pub async fn run(&self) -> Result<(), ServerError> {
@@ -53,20 +95,28 @@ impl Server {
             info!("udp server running");
         }
         let socket = Arc::new(udp_socket);
-        let mut buf = vec![0u8; self.config.udp_buffer_size];
 
         loop {
+            let mut buf = self.buffer_pool.get().await;
+            buf.resize(self.config.udp_buffer_size, 0);
             let (len, src) = socket
                 .recv_from(&mut buf)
                 .await
                 .map_err(ServerError::Socket)?;
 
-            let data = buf[..len].to_vec();
             let handler = Arc::clone(&self.handler);
             let socket = Arc::clone(&socket);
 
+            let pool = Arc::clone(&self.buffer_pool);
+
+            buf.truncate(len);
+
             tokio::spawn(async move {
-                match handler.handle(&data, src.ip()).await {
+                let result = handler.handle(&buf).await;
+
+                pool.put(buf).await;
+
+                match result {
                     Ok(res) => {
                         if let Err(e) = socket.send_to(&res, src).await {
                             error!("cannot send udp: {}", e);
@@ -80,7 +130,7 @@ impl Server {
         }
     }
 
-    async fn serve_tcp(&self, socket: TcpListener) -> Result<(), ServerError> {
-        todo!("serve tcp")
-    }
+    // async fn serve_tcp(&self, socket: TcpListener) -> Result<(), ServerError> {
+    //     todo!("serve tcp")
+    // }
 }

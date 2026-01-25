@@ -51,7 +51,7 @@ impl Resolver {
     }
 
     pub async fn parse(&self, data: &[u8]) -> Result<Query, ResolverError> {
-        let id = self.parse_header(data);
+        // let id = self.parse_header(data);
         let (qname, idx) = self.parse_question(data);
         let qtype = self.parse_qtype(data, idx);
 
@@ -62,7 +62,6 @@ impl Resolver {
         // debug!("qype string: {:02x}", qtype);
 
         Ok(Query {
-            id,
             name: qname_str.to_string(),
             query_type: hickory_proto::rr::RecordType::from(qtype),
             raw: data.to_vec(),
@@ -70,10 +69,10 @@ impl Resolver {
         })
     }
 
-    #[inline]
-    fn parse_header(&self, data: &[u8]) -> u16 {
-        u16::from_be_bytes([data[0], data[1]])
-    }
+    // #[inline]
+    // fn parse_header(&self, data: &[u8]) -> u16 {
+    //     u16::from_be_bytes([data[0], data[1]])
+    // }
 
     // Returns a Vec<u8> containing the dns packet qname and pointer to the last index of qname
     #[inline]

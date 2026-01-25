@@ -11,7 +11,7 @@ use crate::handler::query::Query;
 
 pub enum LoadBalancer {
     RoundRobin,
-    WeightedRR,
+    // WeightedRR,
 }
 
 pub struct UpstreamConfig {
@@ -33,20 +33,20 @@ impl Default for UpstreamConfig {
 #[derive(Debug)]
 pub struct UpstreamResponse {
     pub code: ResponseCode,
-    pub cached: bool,
-    pub blocked: bool,
+    // pub cached: bool,
+    // pub blocked: bool,
     pub raw: Vec<u8>,
 }
 
 impl UpstreamResponse {
-    pub fn blocked() -> Self {
-        Self {
-            code: ResponseCode::NXDomain,
-            cached: false,
-            blocked: true,
-            raw: vec![],
-        }
-    }
+    // pub fn blocked() -> Self {
+    //     Self {
+    //         code: ResponseCode::NXDomain,
+    //         // cached: false,
+    //         // blocked: true,
+    //         raw: vec![],
+    //     }
+    // }
 
     pub fn cached(query: &Query, mut raw: Vec<u8>) -> Self {
         if raw.len() >= 2 && query.raw.len() >= 2 {
@@ -56,8 +56,8 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NoError,
-            cached: true,
-            blocked: false,
+            // cached: true,
+            // blocked: false,
             raw,
         }
     }
@@ -79,8 +79,8 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NXDomain,
-            cached: false,
-            blocked: true,
+            // cached: false,
+            // blocked: true,
             raw,
         }
     }
@@ -117,7 +117,7 @@ impl UpstreamPool {
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, UpstreamError> {
         match self.config.loadbalancer {
             LoadBalancer::RoundRobin => self.rr(query).await,
-            LoadBalancer::WeightedRR => self.weighted_rr(query).await,
+            // LoadBalancer::WeightedRR => self.weighted_rr(query).await,
         }
     }
 
@@ -126,7 +126,9 @@ impl UpstreamPool {
         let mut err = None;
         for attempt in 0..5 {
             let server = &self.config.servers[attempt % self.config.servers.len()];
-            debug!("using server: {}", server);
+            if cfg!(debug_assertions) {
+                debug!("using server: {}", server);
+            }
             // println!("querying server: {}", server);
             match self.query_dns(server, query).await {
                 Ok(response) => return Ok(response),
@@ -138,10 +140,10 @@ impl UpstreamPool {
     }
 
     // todo: weighted round robin and maybe other load balancing methods
-    #[inline]
-    async fn weighted_rr(&self, _query: &Query) -> Result<UpstreamResponse, UpstreamError> {
-        todo!("weighted round robin")
-    }
+    // #[inline]
+    // async fn weighted_rr(&self, _query: &Query) -> Result<UpstreamResponse, UpstreamError> {
+    //     todo!("weighted round robin")
+    // }
 
     async fn query_dns(
         &self,
@@ -168,8 +170,8 @@ impl UpstreamPool {
 
         Ok(UpstreamResponse {
             code: code,
-            cached: false,
-            blocked: false,
+            // cached: false,
+            // blocked: false,
             raw: bytes,
         })
     }

@@ -1,4 +1,4 @@
-use std::{net::IpAddr, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 use ftlog::{debug, info};
 use hickory_proto::op::ResponseCode;
@@ -32,7 +32,6 @@ impl From<BlocklistError> for HandlerError {
 
 #[derive(Debug, Clone)]
 pub struct Query {
-    pub id: u16,
     pub name: String,
     pub query_type: hickory_proto::rr::RecordType,
     pub raw: Vec<u8>,
@@ -49,12 +48,9 @@ impl QueryHandler {
         Self { cache, resolver }
     }
 
-    pub async fn handle(&self, data: &[u8], client: IpAddr) -> Result<Vec<u8>, HandlerError> {
+    pub async fn handle(&self, data: &[u8]) -> Result<Vec<u8>, HandlerError> {
         // parse
         let total = Instant::now();
-        if cfg!(debug_assertions) {
-            debug!("incoming client: {}", client);
-        }
         let begin = Instant::now();
         let query = self.resolver.parse(data).await?;
         let delta = begin.elapsed();
@@ -84,16 +80,21 @@ impl QueryHandler {
                 if cfg!(debug_assertions) {
                     info!("resolve time: {:?}", delta);
                 }
+                // if res.code == ResponseCode::NoError {
+                //     let cache = self.cache.clone();
+                //     let query_clone = query.clone();
+                //     let raw = res.raw.clone();
+                //     let answer_offset = query.answer_offset;
+                //
+                //     tokio::spawn(async move {
+                //         let ttl = Resolver::parse_ttl(&raw, answer_offset);
+                //         let _ = cache.add_query(&query_clone, &raw, ttl).await;
+                //     });
+                // }
+                //
                 if res.code == ResponseCode::NoError {
-                    let cache = self.cache.clone();
-                    let query_clone = query.clone();
-                    let raw = res.raw.clone();
-                    let answer_offset = query.answer_offset;
-
-                    tokio::spawn(async move {
-                        let ttl = Resolver::parse_ttl(&raw, answer_offset);
-                        let _ = cache.add_query(&query_clone, &raw, ttl).await;
-                    });
+                    let ttl = Resolver::parse_ttl(&res.raw, query.answer_offset);
+                    let _ = self.cache.add_query(&query, &res.raw, ttl).await;
                 }
                 if cfg!(debug_assertions) {
                     info!("total time: {:?}", total.elapsed());
