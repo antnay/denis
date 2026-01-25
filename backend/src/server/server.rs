@@ -1,8 +1,11 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use bytes::BytesMut;
-use ftlog::{debug, error, info};
-use tokio::net::{TcpListener, UdpSocket};
+use ftlog::{error, info};
+use tokio::{
+    net::{TcpListener, UdpSocket},
+    sync::mpsc,
+};
 
 use crate::{handler::QueryHandler, server::ServerConfig};
 
@@ -36,7 +39,9 @@ impl Server {
             .await
             .map_err(|e| ServerError::BindTcp(self.config.bind_addr.to_string(), e))?;
 
-        info!("server running: {}", self.config.bind_addr);
+        if cfg!(debug_assertions) {
+            info!("server running: {}", self.config.bind_addr);
+        }
         tokio::select! {
             r = self.serve_udp(udp) => {r},
             // r = self.serve_tcp(tcp) => {r},
@@ -44,44 +49,34 @@ impl Server {
     }
 
     async fn serve_udp(&self, udp_socket: UdpSocket) -> Result<(), ServerError> {
-        info!("udp server running");
+        if cfg!(debug_assertions) {
+            info!("udp server running");
+        }
         let socket = Arc::new(udp_socket);
-        // let mut buf = vec![0u8; self.config.udp_buffer_size];
-        let mut buf = BytesMut::with_capacity(self.config.udp_buffer_size);
+        let mut buf = vec![0u8; self.config.udp_buffer_size];
 
         loop {
-            buf.resize(self.config.udp_buffer_size, 0u8);
             let (len, src) = socket
                 .recv_from(&mut buf)
                 .await
-                .map_err(|e| ServerError::Socket(e))?;
+                .map_err(ServerError::Socket)?;
 
+            let data = buf[..len].to_vec();
             let handler = Arc::clone(&self.handler);
             let socket = Arc::clone(&socket);
-            // let data = buf[..len].to_vec();
-            let data = buf.split_to(len).freeze();
 
             tokio::spawn(async move {
-                Self::handle_udp(socket, handler, &data, src).await;
-            });
-        }
-    }
-
-    async fn handle_udp(
-        socket: Arc<UdpSocket>,
-        handler: Arc<QueryHandler>,
-        data: &[u8],
-        src: SocketAddr,
-    ) {
-        match handler.handle(&data, src.ip()).await {
-            Ok(res) => {
-                if let Err(e) = socket.send_to(&res, src).await {
-                    error!("cannot send udp: {}", e);
+                match handler.handle(&data, src.ip()).await {
+                    Ok(res) => {
+                        if let Err(e) = socket.send_to(&res, src).await {
+                            error!("cannot send udp: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        error!("query handling failed: {}", e);
+                    }
                 }
-            }
-            Err(e) => {
-                error!("query handling failed: {}", e);
-            }
+            });
         }
     }
 

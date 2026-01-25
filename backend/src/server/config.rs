@@ -5,6 +5,7 @@ pub struct ServerConfig {
     pub tcp_timeout: Duration,
     pub max_tcp_connections: usize,
     pub udp_buffer_size: usize,
+    pub worker_queue_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -14,6 +15,7 @@ impl Default for ServerConfig {
             tcp_timeout: Duration::from_secs(10),
             max_tcp_connections: 100,
             udp_buffer_size: 512,
+            worker_queue_size: 1000,
         }
     }
 }

@@ -1,11 +1,4 @@
-use std::sync::Arc;
-
-use ftlog::debug;
-use hickory_proto::op::ResponseCode;
-
-use crate::cache::Blocklist;
 use crate::cache::BlocklistError;
-use crate::cache::Cache;
 use crate::cache::CacheError;
 use crate::handler::UpstreamError;
 use crate::handler::UpstreamPool;
@@ -49,18 +42,12 @@ enum ParseState {
 }
 
 pub struct Resolver {
-    blocklist: Arc<Blocklist>,
-    cache: Arc<Cache>,
     upstream: UpstreamPool,
 }
 
 impl Resolver {
-    pub fn new(blocklist: Arc<Blocklist>, cache: Arc<Cache>, upstream: UpstreamPool) -> Self {
-        Self {
-            blocklist,
-            cache,
-            upstream,
-        }
+    pub fn new(upstream: UpstreamPool) -> Self {
+        Self { upstream }
     }
 
     pub async fn parse(&self, data: &[u8]) -> Result<Query, ResolverError> {
@@ -109,10 +96,19 @@ impl Resolver {
                         buf.push(data[i as usize]);
                     }
                     idx += len as usize;
-                    // fixme: easy branchless
                     if data[idx] != 0x00 {
                         buf.push(46);
                     }
+
+                    // branchless
+                    // let needs_push = (data[idx] != 0x00) as usize;
+                    // let old_len = buf.len();
+                    // buf.reserve(1);
+                    // unsafe {
+                    //     *buf.as_mut_ptr().add(old_len) = 46;
+                    //     buf.set_len(old_len + needs_push);
+                    // }
+
                     state = ParseState::Length;
                 }
             }
@@ -126,46 +122,12 @@ impl Resolver {
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, ResolverError> {
-        // if self.blocklist.is_blocked(query).await? {
-        //     debug!("blocked: {}", query.name);
-        //     return Ok(UpstreamResponse::nxdomain(query));
-        // }
-        //
-        // if let Some(cached) = self.cache.get_query(query).await? {
-        //     debug!("cached: {}", query.name);
-        //     return Ok(UpstreamResponse::cached(query, cached));
-        // }
-
-        match self.cache.check_get(query).await? {
-            (true, _) => {
-                return Ok(UpstreamResponse::nxdomain(query));
-            }
-            (false, Some(cached)) => {
-                return Ok(UpstreamResponse::cached(query, cached));
-            }
-            (false, None) => {
-                // debug!("upstream: {}", query.name);
-                let response = self.upstream.resolve(query).await?;
-
-                if response.code == ResponseCode::NoError {
-                    let cache = self.cache.clone();
-                    let query_clone = query.clone();
-                    let raw = response.raw.clone();
-                    let answer_offset = query.answer_offset;
-
-                    // todo: seperate channel
-                    tokio::spawn(async move {
-                        let ttl = Resolver::parse_ttl(&raw, answer_offset);
-                        let _ = cache.add_query(&query_clone, &raw, ttl).await;
-                    });
-                }
-                Ok(response)
-            }
-        }
+        let res = self.upstream.resolve(query).await?;
+        Ok(res)
     }
 
     #[inline]
-    fn parse_ttl(data: &[u8], mut idx: usize) -> u32 {
+    pub fn parse_ttl(data: &[u8], mut idx: usize) -> u32 {
         idx += 6;
         u32::from_be_bytes([data[idx], data[idx + 1], data[idx + 2], data[idx + 3]])
     }

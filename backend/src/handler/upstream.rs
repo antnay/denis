@@ -37,6 +37,7 @@ pub struct UpstreamResponse {
     pub blocked: bool,
     pub raw: Vec<u8>,
 }
+
 impl UpstreamResponse {
     pub fn blocked() -> Self {
         Self {
