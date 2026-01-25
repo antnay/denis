@@ -126,17 +126,25 @@ impl Resolver {
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, ResolverError> {
-        if self.blocklist.is_blocked(query).await? {
-            debug!("blocked: {}", query.name);
+        // if self.blocklist.is_blocked(query).await? {
+        //     debug!("blocked: {}", query.name);
+        //     return Ok(UpstreamResponse::nxdomain(query));
+        // }
+        //
+        // if let Some(cached) = self.cache.get_query(query).await? {
+        //     debug!("cached: {}", query.name);
+        //     return Ok(UpstreamResponse::cached(query, cached));
+        // }
+
+        match self.cache.check_get(query).await? {
+            (true, _) => {
                 return Ok(UpstreamResponse::nxdomain(query));
             }
-
-        if let Some(cached) = self.cache.get_query(query).await? {
-            debug!("cached: {}", query.name);
-            return Ok(UpstreamResponse::cached(query, cached));
+            (false, Some(cached)) => {
+                return Ok(UpstreamResponse::cached(query, cached));
             }
-
-                debug!("upstream: {}", query.name);
+            (false, None) => {
+                // debug!("upstream: {}", query.name);
                 let response = self.upstream.resolve(query).await?;
 
                 if response.code == ResponseCode::NoError {
@@ -145,12 +153,12 @@ impl Resolver {
                     let raw = response.raw.clone();
                     let answer_offset = query.answer_offset;
 
+                    // todo: seperate channel
                     tokio::spawn(async move {
                         let ttl = Resolver::parse_ttl(&raw, answer_offset);
                         let _ = cache.add_query(&query_clone, &raw, ttl).await;
                     });
                 }
-
                 Ok(response)
             }
         }

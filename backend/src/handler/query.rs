@@ -1,7 +1,5 @@
 use std::{net::IpAddr, time::Instant};
 
-// use tokio::sync::mpsc;
-
 use ftlog::{debug, info};
 
 use crate::handler::resolver::Resolver;
@@ -23,18 +21,11 @@ pub struct Query {
 
 pub struct QueryHandler {
     resolver: Resolver,
-    // logger_tx: mpsc::Sender<Event>,
 }
 
 impl QueryHandler {
-    pub fn new(
-        resolver: Resolver,
-        // _logger_tx: mpsc::Sender<Event>
-    ) -> Self {
-        Self {
-            resolver,
-            // logger_tx,
-        }
+    pub fn new(resolver: Resolver) -> Self {
+        Self { resolver }
     }
 
     pub async fn handle(&self, data: &[u8], client: IpAddr) -> Result<Vec<u8>, HandlerError> {

@@ -38,6 +38,8 @@ impl Blocklist {
         }
     }
 
+    pub fn fetch_lists(&self, urls: &[String]) {}
+
     pub async fn is_blocked(&self, query: &Query) -> Result<bool, BlocklistError> {
         let lower = query.name.to_lowercase();
         let local = self.list.read().await;

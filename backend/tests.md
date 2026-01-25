@@ -197,3 +197,69 @@ Completed 500 concurrent queries in .280359000s
 Effective rate: 1783 qps
 
 === All Tests Complete ===
+
+# 4
+╔════════════════════════════════════════╗
+║     DNS Analytics Proxy Stress Test    ║
+║     Server: 127.0.0.1:5354               ║
+╚════════════════════════════════════════╝
+
+=== Throughput Test (Target: 50k qps) ===
+DNS Performance Testing Tool
+Version 2.14.0
+
+[Status] Command line: dnsperf -s 127.0.0.1 -p 5354 -d /tmp/queries.txt -l 10 -c 100 -Q 60000
+[Status] Sending queries (to 127.0.0.1:5354)
+[Status] Started at: Sat Jan 24 00:09:16 2026
+[Status] Stopping after 10.000000 seconds
+[Status] Testing complete (time limit)
+
+Statistics:
+
+  Queries sent:         174861
+  Queries completed:    174861 (100.00%)
+  Queries lost:         0 (0.00%)
+
+  Response codes:       NOERROR 174861 (100.00%)
+  Average packet size:  request 28, response 49
+  Run time (s):         10.005121
+  Queries per second:   17477.149952
+
+  Average Latency (s):  0.005651 (min 0.001826, max 0.094054)
+  Latency StdDev (s):   0.000940
+
+
+=== Latency Test (Target: <1ms p99) ===
+1000 queries completed
+  Avg: 0.92ms
+  P50: 1ms
+  P95: 1ms
+  P99: 2ms
+✗ P99 above 1ms
+
+=== Cache Hit Rate Test (Target: 85%) ===
+1000 queries, 998 cache hits
+Cache hit rate: 99.80%
+✓ 85% cache hit rate achieved
+
+=== Blocklist Test ===
+Testing blocked domains:
+  ✓ ads.google.com → NXDOMAIN
+  ✓ doubleclick.net → NXDOMAIN
+  ✓ tracking.facebook.com → NXDOMAIN
+  ✓ analytics.google.com → NXDOMAIN
+  ✓ ad.doubleclick.net → NXDOMAIN
+Testing allowed domains:
+  ✓ google.com → NOERROR
+  ✓ facebook.com → NOERROR
+  ✓ github.com → NOERROR
+
+Blocked: 5/5
+Allowed: 3/3
+
+=== Concurrency Test ===
+Spawning 500 concurrent queries...
+Completed 500 concurrent queries in .255304000s
+Effective rate: 1958 qps
+
+=== All Tests Complete ===

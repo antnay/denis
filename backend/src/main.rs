@@ -24,7 +24,8 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let _guard = ftlog::builder()
-        .max_log_level(ftlog::LevelFilter::Trace)
+        // .max_log_level(ftlog::LevelFilter::Trace)
+        .max_log_level(ftlog::LevelFilter::Error)
         .try_init()
         .unwrap();
 

@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use ftlog::{error, info};
+use bytes::BytesMut;
+use ftlog::{debug, error, info};
 use tokio::net::{TcpListener, UdpSocket};
 
 use crate::{handler::QueryHandler, server::ServerConfig};
@@ -45,8 +46,11 @@ impl Server {
     async fn serve_udp(&self, udp_socket: UdpSocket) -> Result<(), ServerError> {
         info!("udp server running");
         let socket = Arc::new(udp_socket);
-        let mut buf = vec![0u8; self.config.udp_buffer_size];
+        // let mut buf = vec![0u8; self.config.udp_buffer_size];
+        let mut buf = BytesMut::with_capacity(self.config.udp_buffer_size);
+
         loop {
+            buf.resize(self.config.udp_buffer_size, 0u8);
             let (len, src) = socket
                 .recv_from(&mut buf)
                 .await
@@ -54,10 +58,11 @@ impl Server {
 
             let handler = Arc::clone(&self.handler);
             let socket = Arc::clone(&socket);
-            let data = buf[..len].to_vec();
+            // let data = buf[..len].to_vec();
+            let data = buf.split_to(len).freeze();
 
             tokio::spawn(async move {
-                Self::handle_udp(socket, handler, data, src).await;
+                Self::handle_udp(socket, handler, &data, src).await;
             });
         }
     }
@@ -65,7 +70,7 @@ impl Server {
     async fn handle_udp(
         socket: Arc<UdpSocket>,
         handler: Arc<QueryHandler>,
-        data: Vec<u8>,
+        data: &[u8],
         src: SocketAddr,
     ) {
         match handler.handle(&data, src.ip()).await {

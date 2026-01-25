@@ -13,7 +13,7 @@ impl Default for ServerConfig {
             bind_addr: "0.0.0.0:53".parse().unwrap(),
             tcp_timeout: Duration::from_secs(10),
             max_tcp_connections: 100,
-            udp_buffer_size: 4096,
+            udp_buffer_size: 512,
         }
     }
 }
