@@ -65,7 +65,6 @@ pub struct Server {
 impl Server {
     pub fn new(config: ServerConfig, handler: Arc<QueryHandler>) -> Self {
         let buffer_pool = BufferPool::new(config.udp_buffer_size, config.udp_buffer_count);
-        debug!("buffer pool {:#?}", buffer_pool);
         Self {
             config,
             handler,

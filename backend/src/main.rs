@@ -3,8 +3,8 @@ mod handler;
 mod server;
 
 use clap::Parser;
-use deadpool_redis::{Config, Runtime};
 use ftlog::{error, info};
+use redis::{Client};
 use std::sync::Arc;
 
 use crate::{
@@ -31,11 +31,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap();
     }
 
-    let def = RedisConfig::default();
-    let conf = Config::from_url(&def.url);
-    let pool = conf.create_pool(Some(Runtime::Tokio1))?;
+    let rds_config = RedisConfig::default();
+    // let conf = Config::from_url(&def.url);
+    // let pool = conf.create_pool(Some(Runtime::Tokio1))?;
+    let rds_conn = Client::open(rds_config.url)
+        .expect("Cannot open redis")
+        .get_multiplexed_async_connection()
+        .await?;
 
-    let cache = Arc::new(Cache::new(pool.clone()));
+    let cache = Arc::new(Cache::new(rds_conn));
     let upstream = UpstreamPool::new(UpstreamConfig::default());
     let resolver = Resolver::new(upstream);
     let handler = Arc::new(QueryHandler::new(cache.clone(), resolver));

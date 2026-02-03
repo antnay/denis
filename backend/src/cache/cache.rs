@@ -1,10 +1,8 @@
 use std::{collections::HashSet, sync::Arc};
 
-use deadpool_redis::{
-    Pool, PoolError,
-    redis::{RedisError, cmd, pipe},
-};
+use deadpool_redis::PoolError;
 use ftlog::{debug, error, info};
+use redis::RedisError;
 use tokio::{sync::RwLock, time::Instant};
 
 use crate::handler::Query;
@@ -42,16 +40,16 @@ impl From<PoolError> for BlocklistError {
 }
 
 pub struct Cache {
-    pool: Pool,
+    conn: redis::aio::MultiplexedConnection,
     list: Arc<RwLock<HashSet<String>>>,
     // moka?
 }
 
 impl Cache {
-    pub fn new(pool: deadpool_redis::Pool) -> Self {
+    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
         Self {
+            conn,
             list: Arc::new(RwLock::new(HashSet::new())),
-            pool,
         }
     }
 
@@ -67,21 +65,21 @@ impl Cache {
     // }
 
     pub async fn add_query(&self, query: &Query, response: &[u8], ttl: u32) {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| error!("could not add query {}", e))
-            .unwrap();
+        let begin = Instant::now();
+        let mut conn = self.conn.clone();
 
         let key = self.query_key(&query);
-        let _ = cmd("SETEX")
+        let _ = redis::cmd("SETEX")
             .arg(&key)
             .arg(ttl)
             .arg(response)
             .query_async::<()>(&mut conn)
             .await
             .map_err(|e| error!("could not add query {}", e));
+        let delta = begin.elapsed();
+        if cfg!(debug_assertions) {
+            info!("add query time: {:?}", delta);
+        }
     }
 
     pub async fn check_and_get(
@@ -100,26 +98,35 @@ impl Cache {
             return Ok((true, None));
         }
 
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| error!("could not add query {}", e))
-            .unwrap();
-
-        let key = self.query_key(&query);
-        let (is_blocked, res) = pipe()
-            .sismember("block:domains", &query.name)
-            .get(&key)
-            .query_async::<(bool, Option<Vec<u8>>)>(&mut conn)
-            .await
-            .map_err(|e| CacheError::Get(e, key))?;
-        let delta = begin.elapsed();
+        let pt = Instant::now();
+        let mut conn = self.conn.clone();
+        let delta = pt.elapsed();
         if cfg!(debug_assertions) {
-            info!("cache time: {:?}", delta);
+            info!("redis connection time: {:?}", delta);
         }
 
-        Ok((is_blocked, res))
+        let begin = Instant::now();
+        let key = self.query_key(&query);
+        let res = redis::cmd("GET")
+            .arg(&key)
+            .query_async::<Option<Vec<u8>>>(&mut conn)
+            .await
+            .map_err(|e| CacheError::Get(e, key))?;
+
+        // let key = self.query_key(&query);
+        // let (is_blocked, res) = redis::pipe()
+        //     .sismember("block:domains", &query.name)
+        //     .get(&key)
+        //     .query_async::<(bool, Option<Vec<u8>>)>(&mut conn)
+        //     .await
+        //     .map_err(|e| CacheError::Get(e, key))?;
+        let delta = begin.elapsed();
+        if cfg!(debug_assertions) {
+            info!("redis time: {:?}", delta);
+        }
+
+        // Ok((is_blocked, res))
+        Ok((false, res))
     }
 
     fn query_key(&self, query: &Query) -> String {
@@ -163,8 +170,8 @@ impl Cache {
         let mut local = self.list.write().await;
         local.insert(lower.clone());
 
-        let mut conn = self.pool.get().await?;
-        cmd("SADD")
+        let mut conn = self.conn.clone();
+        redis::cmd("SADD")
             .arg("block:domains")
             .arg(domain.trim())
             .query_async::<()>(&mut conn)
