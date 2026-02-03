@@ -1,21 +1,23 @@
-use std::{sync::Arc, time::Instant};
+use std::{string::ParseError, sync::Arc, time::Instant};
 
 use ftlog::{debug, info};
 use hickory_proto::op::ResponseCode;
 
 use crate::{
     cache::{BlocklistError, Cache, CacheError},
-    handler::{UpstreamResponse, resolver::Resolver},
+    handler::{Parser, UpstreamError, UpstreamPool, UpstreamResponse},
 };
 
 #[derive(thiserror::Error, Debug)]
 pub enum HandlerError {
-    #[error("resolver error: {0}")]
-    Resolver(#[from] crate::handler::resolver::ResolverError),
+    #[error("parser error: {0}")]
+    Parser(ParseError),
     #[error("cache error: {0}")]
     Cache(CacheError),
     #[error("blocklist error: {0}")]
     Blocklist(BlocklistError),
+    #[error("upstream error: {0}")]
+    Upstream(UpstreamError),
 }
 
 impl From<CacheError> for HandlerError {
@@ -30,6 +32,18 @@ impl From<BlocklistError> for HandlerError {
     }
 }
 
+impl From<UpstreamError> for HandlerError {
+    fn from(err: UpstreamError) -> Self {
+        HandlerError::Upstream(err)
+    }
+}
+
+impl From<ParseError> for HandlerError {
+    fn from(err: ParseError) -> Self {
+        HandlerError::Parser(err)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Query {
     pub name: String,
@@ -40,20 +54,18 @@ pub struct Query {
 
 pub struct QueryHandler {
     cache: Arc<Cache>,
-    resolver: Resolver,
+    upstream: UpstreamPool,
 }
 
 impl QueryHandler {
-    pub fn new(cache: Arc<Cache>, resolver: Resolver) -> Self {
-        Self { cache, resolver }
+    pub fn new(cache: Arc<Cache>, upstream: UpstreamPool) -> Self {
+        Self { cache, upstream }
     }
 
     pub async fn handle(&self, data: &[u8]) -> Result<Vec<u8>, HandlerError> {
-        // parse
         let total = Instant::now();
-        let begin = Instant::now();
-        let query = self.resolver.parse(data).await?;
-        let delta = begin.elapsed();
+        let query = Parser::parse_udp(data).await;
+        let delta = total.elapsed();
         if cfg!(debug_assertions) {
             info!("parse time: {:?}", delta);
         }
@@ -75,11 +87,12 @@ impl QueryHandler {
             }
             (false, None) => {
                 let begin = Instant::now();
-                let res = self.resolver.resolve(&query).await?;
+                let res = self.upstream.resolve(&query).await?;
                 let delta = begin.elapsed();
                 if cfg!(debug_assertions) {
                     info!("resolve time: {:?}", delta);
                 }
+                // handle better
                 // if res.code == ResponseCode::NoError {
                 //     let cache = self.cache.clone();
                 //     let query_clone = query.clone();
@@ -93,7 +106,7 @@ impl QueryHandler {
                 // }
                 //
                 if res.code == ResponseCode::NoError {
-                    let ttl = Resolver::parse_ttl(&res.raw, query.answer_offset);
+                    let ttl = Parser::parse_ttl(&res.raw, query.answer_offset);
                     let _ = self.cache.add_query(&query, &res.raw, ttl).await;
                 }
                 if cfg!(debug_assertions) {

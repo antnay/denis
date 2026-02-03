@@ -4,12 +4,12 @@ mod server;
 
 use clap::Parser;
 use ftlog::{error, info};
-use redis::{Client};
+use redis::Client;
 use std::sync::Arc;
 
 use crate::{
     cache::{Cache, RedisConfig},
-    handler::{QueryHandler, Resolver, UpstreamConfig, UpstreamPool},
+    handler::{QueryHandler, UpstreamConfig, UpstreamPool},
     server::{Server, ServerConfig},
 };
 
@@ -41,8 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cache = Arc::new(Cache::new(rds_conn));
     let upstream = UpstreamPool::new(UpstreamConfig::default());
-    let resolver = Resolver::new(upstream);
-    let handler = Arc::new(QueryHandler::new(cache.clone(), resolver));
+    let handler = Arc::new(QueryHandler::new(cache.clone(), upstream));
 
     // todo: get rid of me
     cache.add_block_domain("ads.google.com").await?;
