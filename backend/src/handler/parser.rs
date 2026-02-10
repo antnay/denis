@@ -68,27 +68,13 @@ impl Parser {
                     }
                     idx += len as usize;
 
-                    // let time = Instant::now();
-                    // if data[idx] != 0x00 {
-                    //     buf.push(46);
-                    // }
-                    // let delta = time.elapsed();
-                    // if cfg!(debug_assertions) {
-                    //     info!("push period time: {:?}", delta);
-                    // }
-
-                    // branchless
                     let time = Instant::now();
-                    let needs_push = (data[idx] != 0x00) as usize;
-                    let old_len = buf.len();
-                    buf.reserve(1);
-                    unsafe {
-                        *buf.as_mut_ptr().add(old_len) = 46;
-                        buf.set_len(old_len + needs_push);
+                    if data[idx] != 0x00 {
+                        buf.push(46);
                     }
                     let delta = time.elapsed();
                     if cfg!(debug_assertions) {
-                        info!("branchless push period time: {:?}", delta);
+                        info!("push period time: {:?}", delta);
                     }
 
                     state = ParseState::Length;
