@@ -4,8 +4,8 @@ use ftlog::{debug, info};
 use hickory_proto::op::ResponseCode;
 
 use crate::{
-    cache::{BlocklistError, Cache, CacheError},
     handler::{Parser, UpstreamError, UpstreamPool, UpstreamResponse},
+    repo::{Cache, CacheError},
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -14,8 +14,6 @@ pub enum HandlerError {
     Parser(ParseError),
     #[error("cache error: {0}")]
     Cache(CacheError),
-    #[error("blocklist error: {0}")]
-    Blocklist(BlocklistError),
     #[error("upstream error: {0}")]
     Upstream(UpstreamError),
 }
@@ -23,12 +21,6 @@ pub enum HandlerError {
 impl From<CacheError> for HandlerError {
     fn from(err: CacheError) -> Self {
         HandlerError::Cache(err)
-    }
-}
-
-impl From<BlocklistError> for HandlerError {
-    fn from(err: BlocklistError) -> Self {
-        HandlerError::Blocklist(err)
     }
 }
 
@@ -107,7 +99,7 @@ impl QueryHandler {
                 //
                 if res.code == ResponseCode::NoError {
                     let ttl = Parser::parse_ttl(&res.raw, query.answer_offset);
-                    let _ = self.cache.add_query(&query, &res.raw, ttl).await;
+                    let _ = self.cache.add_dns_query(&query, &res.raw, ttl).await;
                 }
                 if cfg!(debug_assertions) {
                     info!("total time: {:?}", total.elapsed());

@@ -16,16 +16,26 @@ services:
   #     - "6379:6379"
   #   volumes:
   #     - redis_data:/data
+  
+  db:
+    image: postgres:18.1-alpine3.23
+    restart: always
+    shm_size: 128mb
+    environment:
+      POSTGRES_PASSWORD: password
+    volumes:
+      - db_data:/var/lib/postgresql/data
 
-  dragonfly:
+  cache:
     image: 'docker.dragonflydb.io/dragonflydb/dragonfly'
     ulimits:
       memlock: -1
     ports:
       - "6379:6379"
     volumes:
-      - dragonflydb_data:/data
+      - cache_data:/data
 
 volumes:
   # redis_data:
-  dragonflydb_data:
+  db_data:
+  cache_data:

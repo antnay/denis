@@ -1,16 +1,17 @@
-mod cache;
+mod dns;
 mod handler;
-mod server;
+mod repo;
 
 use clap::Parser;
 use ftlog::{error, info};
 use redis::Client;
+use sqlx::postgres;
 use std::sync::Arc;
 
 use crate::{
-    cache::{Cache, RedisConfig},
+    dns::{Server, ServerConfig},
     handler::{QueryHandler, UpstreamConfig, UpstreamPool},
-    server::{Server, ServerConfig},
+    repo::{Cache, PGConfig, RedisConfig},
 };
 
 #[derive(Parser, Debug)]
@@ -32,23 +33,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let rds_config = RedisConfig::default();
-    // let conf = Config::from_url(&def.url);
-    // let pool = conf.create_pool(Some(Runtime::Tokio1))?;
     let rds_conn = Client::open(rds_config.url)
         .expect("Cannot open redis")
         .get_multiplexed_async_connection()
         .await?;
 
-    let cache = Arc::new(Cache::new(rds_conn));
+    let pg_config = PGConfig::default();
+    let pg_pool = postgres::PgPoolOptions::new()
+        .max_connections(pg_config.max_connections)
+        .idle_timeout(pg_config.idle_timeout)
+        .connect(&pg_config.url)
+        .await?;
+
+    let cache = Arc::new(Cache::new(rds_conn, pg_pool));
+
     let upstream = UpstreamPool::new(UpstreamConfig::default());
     let handler = Arc::new(QueryHandler::new(cache.clone(), upstream));
 
     // todo: get rid of me
-    cache.add_block_domain("ads.google.com").await?;
-    cache.add_block_domain("doubleclick.net").await?;
-    cache.add_block_domain("tracking.facebook.com").await?;
-    cache.add_block_domain("analytics.google.com").await?;
-    cache.add_block_domain("ad.doubleclick.net").await?;
+    cache.add_block_domain("", "ads.google.com").await?;
+    cache.add_block_domain("", "doubleclick.net").await?;
+    cache.add_block_domain("", "tracking.facebook.com").await?;
+    cache.add_block_domain("", "analytics.google.com").await?;
+    cache.add_block_domain("", "ad.doubleclick.net").await?;
 
     let mut config = ServerConfig::default();
     config.bind_addr = cli.bind.parse()?;

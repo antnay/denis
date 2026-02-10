@@ -537,3 +537,71 @@ Completed 500 concurrent queries in .284895000s
 Effective rate: 1755 qps
 
 === All Tests Complete ===
+
+# 9 redis pool -> multiplex conn and in memory blocklist only
+## commit f0b6251b0f45068c624d8aff8b23a388456a2a41 
+╔════════════════════════════════════════╗
+║     DNS Analytics Proxy Stress Test    ║
+║     Server: 127.0.0.1:5354               ║
+╚════════════════════════════════════════╝
+
+=== Throughput Test (Target: 50k qps) ===
+DNS Performance Testing Tool
+Version 2.14.0
+
+[Status] Command line: dnsperf -s 127.0.0.1 -p 5354 -d /tmp/queries.txt -l 10 -c 100 -Q 60000
+[Status] Sending queries (to 127.0.0.1:5354)
+[Status] Started at: Tue Feb  3 03:11:35 2026
+[Status] Stopping after 10.000000 seconds
+[Status] Testing complete (time limit)
+
+Statistics:
+
+  Queries sent:         449433
+  Queries completed:    449433 (100.00%)
+  Queries lost:         0 (0.00%)
+
+  Response codes:       NOERROR 449433 (100.00%)
+  Average packet size:  request 28, response 76
+  Run time (s):         10.001133
+  Queries per second:   44938.208501
+
+  Average Latency (s):  0.002147 (min 0.000221, max 0.106797)
+  Latency StdDev (s):   0.001653
+
+
+=== Latency Test (Target: <1ms p99) ===
+1000 queries completed
+  Avg: 0.00ms
+  P50: 0ms
+  P95: 0ms
+  P99: 0ms
+✓ Sub-millisecond p99 achieved
+
+=== Cache Hit Rate Test (Target: 85%) ===
+1000 queries, 1000 cache hits
+Cache hit rate: 100.00%
+✓ 85% cache hit rate achieved
+
+=== Blocklist Test ===
+Testing blocked domains:
+  ✓ ads.google.com → NXDOMAIN
+  ✓ doubleclick.net → NXDOMAIN
+  ✓ tracking.facebook.com → NXDOMAIN
+  ✓ analytics.google.com → NXDOMAIN
+  ✓ ad.doubleclick.net → NXDOMAIN
+Testing allowed domains:
+  ✓ google.com → NOERROR
+  ✓ facebook.com → NOERROR
+  ✓ github.com → NOERROR
+
+Blocked: 5/5
+Allowed: 3/3
+
+=== Concurrency Test ===
+Spawning 500 concurrent queries...
+Completed 500 concurrent queries in 1.071679000s
+Effective rate: 466 qps
+
+=== All Tests Complete ===
+

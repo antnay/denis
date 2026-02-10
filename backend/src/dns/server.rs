@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use bytes::BytesMut;
-use ftlog::{debug, error, info};
+use ftlog::{error, info};
 use tokio::{
     net::{TcpListener, UdpSocket},
     sync::Mutex,
 };
 
-use crate::{handler::QueryHandler, server::ServerConfig};
+use crate::{dns::ServerConfig, handler::QueryHandler};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {

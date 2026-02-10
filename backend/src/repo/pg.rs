@@ -1,0 +1,18 @@
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub struct PGConfig {
+    pub url: String,
+    pub max_connections: u32,
+    pub idle_timeout: Duration,
+}
+
+impl Default for PGConfig {
+    fn default() -> Self {
+        Self {
+            url: "postgresql://postgres:postgres@postgres:5432/postgres".into(),
+            max_connections: 16,
+            idle_timeout: Duration::from_secs(5),
+        }
+    }
+}

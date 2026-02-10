@@ -1,5 +1,3 @@
-// use std::time::Duration;
-
 use redis::ConnectionAddr;
 
 #[derive(Debug, Clone)]
