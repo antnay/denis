@@ -23,14 +23,18 @@ pub struct UpstreamConfig {
 impl Default for UpstreamConfig {
     fn default() -> Self {
         Self {
-            servers: vec!["9.9.9.9:53".parse().unwrap(), "1.1.1.1:53".parse().unwrap()],
+            servers: vec![
+                "10.0.69.1:53".parse().unwrap(),
+                "9.9.9.9:53".parse().unwrap(),
+                "1.1.1.1:53".parse().unwrap(),
+            ],
             timeout: Duration::from_secs(5),
             loadbalancer: LoadBalancer::RoundRobin,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UpstreamResponse {
     pub code: ResponseCode,
     // pub cached: bool,

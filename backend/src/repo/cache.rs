@@ -1,3 +1,4 @@
+use bytes::{Bytes, BytesMut};
 use core::fmt::Write;
 use ftlog::{debug, error, info};
 use redis::RedisError;
@@ -5,7 +6,7 @@ use sqlx::PgPool;
 use std::{collections::HashSet, sync::Arc};
 use tokio::{sync::RwLock, time::Instant};
 
-use crate::handler::Query;
+use crate::handler::{Query, UpstreamResponse};
 
 #[derive(thiserror::Error, Debug)]
 pub enum CacheError {
@@ -29,6 +30,7 @@ impl From<redis::RedisError> for CacheError {
 
 pub struct Cache {
     // moka?
+    l1: moka::future::Cache<String, BytesMut>,
     allow_list: Arc<RwLock<HashSet<String>>>,
     block_list: Arc<RwLock<HashSet<String>>>,
     rds_conn: redis::aio::MultiplexedConnection,
@@ -38,6 +40,7 @@ pub struct Cache {
 impl Cache {
     pub fn new(rds_conn: redis::aio::MultiplexedConnection, pg_pool: PgPool) -> Self {
         Self {
+            l1: moka::future::Cache::new(10000),
             allow_list: Arc::new(RwLock::new(HashSet::new())),
             block_list: Arc::new(RwLock::new(HashSet::new())),
             rds_conn,
@@ -58,10 +61,12 @@ impl Cache {
 
     pub async fn add_dns_query(&self, query: &Query, response: &[u8], ttl: u32) {
         let begin = Instant::now();
-        let mut conn = self.rds_conn.clone();
+
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, &query);
         let key = buf.to_string();
+
+        let mut conn = self.rds_conn.clone();
         let _ = redis::cmd("SETEX")
             .arg(&key)
             .arg(ttl)
@@ -81,17 +86,27 @@ impl Cache {
         let begin = Instant::now();
         let lower = query.name.to_lowercase();
 
-        let allow = self.allow_list.read().await;
-        if allow.contains(&lower) {
-            let delta = begin.elapsed();
-            if cfg!(debug_assertions) {
-                info!("allow time: {:?}", delta);
-            }
-            return Ok((false, None));
-        }
+        // let allow = self.allow_list.read().await;
+        // if allow.contains(&lower) {
+        //     let delta = begin.elapsed();
+        //     if cfg!(debug_assertions) {
+        //         info!("allow time: {:?}", delta);
+        //     }
+        //     return Ok((false, None));
+        // }
+        // if block.contains(&lower) {
+        //     let delta = begin.elapsed();
+        //     if cfg!(debug_assertions) {
+        //         info!("block time: {:?}", delta);
+        //         debug!("in memory block");
+        //     }
+        //     return Ok((true, None));
+        // }
 
-        let block = self.block_list.read().await;
-        if block.contains(&lower) {
+        let allowed = !self.block_list.read().await.contains(&lower)
+            || self.allow_list.read().await.contains(&lower);
+
+        if !allowed {
             let delta = begin.elapsed();
             if cfg!(debug_assertions) {
                 info!("block time: {:?}", delta);
@@ -111,7 +126,6 @@ impl Cache {
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, &query);
         let key = buf.to_string();
-
         let res = redis::cmd("GET")
             .arg(&key)
             .query_async::<Option<Vec<u8>>>(&mut conn)
@@ -125,7 +139,7 @@ impl Cache {
 
     #[inline]
     fn query_key(&self, buf: &mut heapless::String<128>, query: &Query) {
-        write!(buf, "dns:{}:{}", query.name, query.query_type);
+        let _ = write!(buf, "dns:{}:{}", query.name, query.query_type);
     }
 
     pub async fn add_allow_domain(&self, list: &str, domain: &str) -> Result<(), CacheError> {
@@ -133,25 +147,27 @@ impl Cache {
         let mut local = self.block_list.write().await;
         local.insert(lower.clone());
 
-        sqlx::query("INSERT INTO blocked ('list', 'domain') VALUES ?, ?")
+        sqlx::query("INSERT INTO allowed (domain) VALUES ($1, $2)")
             .bind(list)
             .bind(domain)
             .execute(&self.pg_pool)
-            .await?;
+            .await
+            .map_err(|e| CacheError::Sql(e))?;
 
         Ok(())
     }
 
     pub async fn add_block_domain(&self, list: &str, domain: &str) -> Result<(), CacheError> {
         let lower = domain.to_lowercase();
-        let mut local = self.allow_list.write().await;
+        let mut local = self.block_list.write().await;
         local.insert(lower.clone());
 
-        sqlx::query("INSERT INTO allowed ('list', 'domain') VALUES ?, ?")
+        sqlx::query("INSERT INTO blocked (list, domain) VALUES ($1, $2)")
             .bind(list)
             .bind(domain)
             .execute(&self.pg_pool)
-            .await?;
+            .await
+            .map_err(|e| CacheError::Sql(e))?;
 
         Ok(())
     }

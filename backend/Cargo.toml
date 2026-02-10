@@ -26,3 +26,4 @@ ftlog = "0.2"
 serde = "1.0.228"
 bytes = "1.11.0"
 heapless = "0.9.2"
+moka = { version = "0.12.13", features = ["future"] }

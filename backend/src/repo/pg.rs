@@ -10,7 +10,7 @@ pub struct PGConfig {
 impl Default for PGConfig {
     fn default() -> Self {
         Self {
-            url: "postgresql://postgres:postgres@postgres:5432/postgres".into(),
+            url: "postgresql://postgres:postgres@localhost:5433/denis".into(),
             max_connections: 16,
             idle_timeout: Duration::from_secs(5),
         }

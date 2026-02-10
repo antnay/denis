@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rds_config = RedisConfig::default();
     let rds_conn = Client::open(rds_config.url)
-        .expect("Cannot open redis")
+        .expect("Cannot connect to redis")
         .get_multiplexed_async_connection()
         .await?;
 
@@ -43,10 +43,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(pg_config.max_connections)
         .idle_timeout(pg_config.idle_timeout)
         .connect(&pg_config.url)
-        .await?;
+        .await
+        .expect("Cannot connect to postgres");
+
+    let _ = sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS allowed (
+            id SERIAL PRIMARY KEY, 
+            domain VARCHAR(50) NOT NULL
+        )
+        ",
+    )
+    .execute(&pg_pool)
+    .await
+    .expect("failed to create allowed table");
+
+    let _ = sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS blocked ( 
+            id SERIAL PRIMARY KEY,
+            list VARCHAR(50),
+            domain VARCHAR(50) NOT NULL 
+        )
+        ",
+    )
+    .execute(&pg_pool)
+    .await
+    .expect("failed to create blocked table");
 
     let cache = Arc::new(Cache::new(rds_conn, pg_pool));
-
     let upstream = UpstreamPool::new(UpstreamConfig::default());
     let handler = Arc::new(QueryHandler::new(cache.clone(), upstream));
 
