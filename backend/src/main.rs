@@ -36,7 +36,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rds_conn = Client::open(rds_config.url)
         .expect("Cannot connect to redis")
         .get_multiplexed_async_connection()
-        .await?;
+        .await
+        .expect("Cannot get redis multiplex connection");
 
     let pg_config = PGConfig::default();
     let pg_pool = postgres::PgPoolOptions::new()
@@ -82,8 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cache.add_block_domain("", "analytics.google.com").await?;
     cache.add_block_domain("", "ad.doubleclick.net").await?;
 
-    let mut config = ServerConfig::default();
-    config.bind_addr = cli.bind.parse()?;
+    let config = ServerConfig {
+        bind_addr: cli.bind.parse()?,
+        ..Default::default()
+    };
     let dns_server = Server::new(config, handler);
     // axum
     if cfg!(debug_assertions) {

@@ -1,7 +1,7 @@
-use std::{net::SocketAddr, time::Duration, vec};
-
+use bytes::BytesMut;
 use ftlog::debug;
 use hickory_proto::op::ResponseCode;
+use std::{net::SocketAddr, time::Duration, vec};
 use tokio::{
     net::UdpSocket,
     time::{error::Elapsed, timeout},
@@ -37,9 +37,7 @@ impl Default for UpstreamConfig {
 #[derive(Debug, Clone)]
 pub struct UpstreamResponse {
     pub code: ResponseCode,
-    // pub cached: bool,
-    // pub blocked: bool,
-    pub raw: Vec<u8>,
+    pub raw: BytesMut,
 }
 
 impl UpstreamResponse {
@@ -52,7 +50,7 @@ impl UpstreamResponse {
     //     }
     // }
 
-    pub fn cached(query: &Query, mut raw: Vec<u8>) -> Self {
+    pub fn cached(query: &Query, mut raw: BytesMut) -> Self {
         if raw.len() >= 2 && query.raw.len() >= 2 {
             raw[0] = query.raw[0];
             raw[1] = query.raw[1];
@@ -60,16 +58,13 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NoError,
-            // cached: true,
-            // blocked: false,
             raw,
         }
     }
-    pub fn nxdomain(query: &Query) -> Self {
-        let response_len = query.answer_offset;
-        let mut raw = query.raw[..response_len.min(query.raw.len())].to_vec();
 
-        if raw.len() >= 12 {
+    pub fn nxdomain(query: &mut Query) -> Self {
+        let mut raw = query.raw.split_off(query.answer_offset);
+        if query.raw.len() >= 12 {
             let rd = raw[2] & 0x01;
             raw[2] = 0x84 | rd;
             raw[3] = 0x83;
@@ -83,8 +78,6 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NXDomain,
-            // cached: false,
-            // blocked: true,
             raw,
         }
     }
@@ -133,7 +126,6 @@ impl UpstreamPool {
             if cfg!(debug_assertions) {
                 debug!("using server: {}", server);
             }
-            // println!("querying server: {}", server);
             match self.query_dns(server, query).await {
                 Ok(response) => return Ok(response),
                 Err(e) => err = Some(e),
@@ -156,12 +148,15 @@ impl UpstreamPool {
     ) -> Result<UpstreamResponse, UpstreamError> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.connect(server).await?;
-        socket.send(&query.raw).await?;
-        let mut buf = vec![0u8; 4096];
-        let len = timeout(self.config.timeout, socket.recv(&mut buf)).await??;
-        let bytes = buf[..len].to_vec();
-        let code = if bytes.len() >= 4 {
-            match bytes[3] & 0x0F {
+        socket.send(&query.raw[..]).await?;
+        let mut buf = bytes::BytesMut::zeroed(4096);
+        let n = timeout(self.config.timeout, socket.recv(&mut buf)).await??;
+        buf.truncate(n);
+        if cfg!(debug_assertions) {
+            debug!("UpstreamResponse: {:?}", buf);
+        }
+        let code = if buf.len() >= 4 {
+            match buf[3] & 0x0F {
                 0 => ResponseCode::NoError,
                 2 => ResponseCode::ServFail,
                 3 => ResponseCode::NXDomain,
@@ -172,11 +167,6 @@ impl UpstreamPool {
             ResponseCode::ServFail
         };
 
-        Ok(UpstreamResponse {
-            code: code,
-            // cached: false,
-            // blocked: false,
-            raw: bytes,
-        })
+        Ok(UpstreamResponse { code, raw: buf })
     }
 }

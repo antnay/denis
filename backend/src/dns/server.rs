@@ -112,9 +112,7 @@ impl Server {
 
             tokio::spawn(async move {
                 let result = handler.handle(&buf).await;
-
                 pool.put(buf).await;
-
                 match result {
                     Ok(res) => {
                         if let Err(e) = socket.send_to(&res, src).await {

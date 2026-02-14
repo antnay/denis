@@ -1,6 +1,7 @@
 use std::time::Instant;
 
-use ftlog::info;
+use bytes::{BufMut, BytesMut};
+use ftlog::{debug, info};
 
 use crate::handler::Query;
 
@@ -21,21 +22,22 @@ pub struct Parser {}
 
 impl Parser {
     // Should probably check if valid
-    pub async fn parse_udp(data: &[u8]) -> Query {
+    pub async fn parse_udp(data: &BytesMut) -> Query {
         // let id = self.parse_header(data);
         let (qname, idx) = Parser::parse_question(data).await;
         let qtype = Parser::parse_qtype(data, idx);
-
         let qname_str = String::from_utf8_lossy(&qname);
 
-        // debug!("qname bytes: {:?}", qname);
-        // debug!("qname string: {}", qname_str.to_string());
-        // debug!("qype string: {:02x}", qtype);
+        if cfg!(debug_assertions) {
+            debug!("qname bytes: {:?}", qname);
+            debug!("qname string: {}", qname_str.to_string());
+            debug!("qype string: {:02x}", qtype);
+        }
 
         Query {
             name: qname_str.to_string(),
             query_type: hickory_proto::rr::RecordType::from(qtype),
-            raw: data.to_vec(),
+            raw: data.clone(),
             answer_offset: idx + 5,
         }
     }
@@ -48,11 +50,12 @@ impl Parser {
     // Returns a Vec<u8> containing the dns packet qname and pointer to the last index of qname
     // Should probably check if valid
     #[inline]
-    async fn parse_question(data: &[u8]) -> (Vec<u8>, usize) {
+    async fn parse_question(data: &BytesMut) -> (BytesMut, usize) {
         let mut idx = QUESTION;
         let mut len = 0;
         let mut state = ParseState::Length;
-        let mut buf = Vec::with_capacity(64);
+        // let mut buf = Vec::with_capacity(64);
+        let mut buf = BytesMut::with_capacity(64);
 
         while data[idx] != 0x00 {
             match state {
@@ -64,13 +67,13 @@ impl Parser {
                 ParseState::Scan => {
                     let stop = idx + len as usize;
                     for i in idx..stop {
-                        buf.push(data[i as usize]);
+                        buf.put_u8(data[i]);
                     }
                     idx += len as usize;
 
                     let time = Instant::now();
                     if data[idx] != 0x00 {
-                        buf.push(46);
+                        buf.put_u8(46);
                     }
                     let delta = time.elapsed();
                     if cfg!(debug_assertions) {
@@ -85,7 +88,7 @@ impl Parser {
     }
 
     #[inline]
-    const fn parse_qtype(data: &[u8], idx: usize) -> u16 {
+    fn parse_qtype(data: &BytesMut, idx: usize) -> u16 {
         u16::from_be_bytes([data[idx + 1], data[idx + 2]])
     }
 

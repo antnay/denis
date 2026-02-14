@@ -1,5 +1,6 @@
 use std::{string::ParseError, sync::Arc, time::Instant};
 
+use bytes::BytesMut;
 use ftlog::{debug, info};
 use hickory_proto::op::ResponseCode;
 
@@ -40,7 +41,7 @@ impl From<ParseError> for HandlerError {
 pub struct Query {
     pub name: String,
     pub query_type: hickory_proto::rr::RecordType,
-    pub raw: Vec<u8>,
+    pub raw: BytesMut,
     pub answer_offset: usize,
 }
 
@@ -54,9 +55,12 @@ impl QueryHandler {
         Self { cache, upstream }
     }
 
-    pub async fn handle(&self, data: &[u8]) -> Result<Vec<u8>, HandlerError> {
+    pub async fn handle(&self, data: &BytesMut) -> Result<BytesMut, HandlerError> {
+        if cfg!(debug_assertions) {
+            debug!("Query before parse: {:x}", data);
+        }
         let total = Instant::now();
-        let query = Parser::parse_udp(data).await;
+        let mut query = Parser::parse_udp(data).await;
         let delta = total.elapsed();
         if cfg!(debug_assertions) {
             info!("parse time: {:?}", delta);
@@ -68,14 +72,14 @@ impl QueryHandler {
                     debug!("blocked");
                     info!("total time: {:?}", total.elapsed());
                 }
-                return Ok(UpstreamResponse::nxdomain(&query).raw);
+                Ok(UpstreamResponse::nxdomain(&mut query).raw)
             }
             (false, Some(cached)) => {
                 if cfg!(debug_assertions) {
                     debug!("cached");
                     info!("total time: {:?}", total.elapsed());
                 }
-                return Ok(UpstreamResponse::cached(&query, cached).raw);
+                Ok(UpstreamResponse::cached(&query, cached).raw)
             }
             (false, None) => {
                 let begin = Instant::now();
@@ -99,7 +103,7 @@ impl QueryHandler {
                 //
                 if res.code == ResponseCode::NoError {
                     let ttl = Parser::parse_ttl(&res.raw, query.answer_offset);
-                    let _ = self.cache.add_dns_query(&query, &res.raw, ttl).await;
+                    let _ = self.cache.add_dns_query(&query, res.raw.clone(), ttl).await;
                 }
                 if cfg!(debug_assertions) {
                     info!("total time: {:?}", total.elapsed());

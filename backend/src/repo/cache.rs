@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use std::{collections::HashSet, sync::Arc};
 use tokio::{sync::RwLock, time::Instant};
 
-use crate::handler::{Query, UpstreamResponse};
+use crate::handler::Query;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CacheError {
@@ -59,20 +59,22 @@ impl Cache {
     //     Ok(res)
     // }
 
-    pub async fn add_dns_query(&self, query: &Query, response: &[u8], ttl: u32) {
+    pub async fn add_dns_query(&self, query: &Query, response: BytesMut, ttl: u32) {
         let begin = Instant::now();
 
         let mut buf: heapless::String<128> = heapless::String::new();
-        self.query_key(&mut buf, &query);
+        self.query_key(&mut buf, query);
         let key = buf.to_string();
 
         let mut conn = self.rds_conn.clone();
         let _ = redis::cmd("SETEX")
             .arg(&key)
             .arg(ttl)
-            .arg(response)
+            .arg(response.trim_ascii())
             .query_async::<()>(&mut conn)
             .await;
+
+        self.l1.insert(key, response).await;
         let delta = begin.elapsed();
         if cfg!(debug_assertions) {
             info!("add query time: {:?}", delta);
@@ -82,26 +84,9 @@ impl Cache {
     pub async fn check_and_get(
         &self,
         query: &Query,
-    ) -> Result<(bool, Option<Vec<u8>>), CacheError> {
+    ) -> Result<(bool, Option<BytesMut>), CacheError> {
         let begin = Instant::now();
         let lower = query.name.to_lowercase();
-
-        // let allow = self.allow_list.read().await;
-        // if allow.contains(&lower) {
-        //     let delta = begin.elapsed();
-        //     if cfg!(debug_assertions) {
-        //         info!("allow time: {:?}", delta);
-        //     }
-        //     return Ok((false, None));
-        // }
-        // if block.contains(&lower) {
-        //     let delta = begin.elapsed();
-        //     if cfg!(debug_assertions) {
-        //         info!("block time: {:?}", delta);
-        //         debug!("in memory block");
-        //     }
-        //     return Ok((true, None));
-        // }
 
         let allowed = !self.block_list.read().await.contains(&lower)
             || self.allow_list.read().await.contains(&lower);
@@ -124,17 +109,17 @@ impl Cache {
 
         let begin = Instant::now();
         let mut buf: heapless::String<128> = heapless::String::new();
-        self.query_key(&mut buf, &query);
+        self.query_key(&mut buf, query);
         let key = buf.to_string();
         let res = redis::cmd("GET")
             .arg(&key)
-            .query_async::<Option<Vec<u8>>>(&mut conn)
+            .query_async::<Option<Bytes>>(&mut conn)
             .await?;
         let delta = begin.elapsed();
         if cfg!(debug_assertions) {
             info!("redis time: {:?}", delta);
         }
-        Ok((false, res))
+        Ok((false, res.map(BytesMut::from)))
     }
 
     #[inline]
@@ -152,7 +137,7 @@ impl Cache {
             .bind(domain)
             .execute(&self.pg_pool)
             .await
-            .map_err(|e| CacheError::Sql(e))?;
+            .map_err(CacheError::Sql)?;
 
         Ok(())
     }
@@ -167,7 +152,7 @@ impl Cache {
             .bind(domain)
             .execute(&self.pg_pool)
             .await
-            .map_err(|e| CacheError::Sql(e))?;
+            .map_err(CacheError::Sql)?;
 
         Ok(())
     }
