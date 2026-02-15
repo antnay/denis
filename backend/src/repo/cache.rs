@@ -1,9 +1,10 @@
 use core::fmt::Write;
 use ftlog::{debug, error, info};
 use redis::RedisError;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row, postgres::PgRow};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, time::Instant};
+use tokio_stream::StreamExt;
 
 use crate::handler::Query;
 
@@ -179,5 +180,19 @@ impl Cache {
             .map_err(CacheError::Sql)?;
 
         Ok(())
+    }
+
+    pub async fn read_blocklist_db_memory(&self) {
+        let mut local = self.block_list.write().await;
+        let mut stream = sqlx::query("SELECT domain FROM blocked")
+            .map(|row: PgRow| {
+                let domain: String = row.try_get("domain").unwrap();
+                domain
+            })
+            .fetch(&self.pg_pool);
+
+        while let Some(Ok(domain)) = stream.next().await {
+            local.insert(domain);
+        }
     }
 }

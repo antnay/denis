@@ -452,6 +452,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

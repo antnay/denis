@@ -30,10 +30,9 @@ pub struct BufferPool {
 
 impl BufferPool {
     pub fn new(buffer_size: usize, initial_count: usize) -> Arc<Self> {
-        let mut pool = Vec::with_capacity(initial_count);
-        for _ in 0..initial_count {
-            pool.push(BytesMut::with_capacity(buffer_size));
-        }
+        let pool = (0..initial_count)
+            .map(|_| BytesMut::zeroed(buffer_size))
+            .collect();
         Arc::new(Self {
             pool: Mutex::new(pool),
             buffer_size,

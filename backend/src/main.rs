@@ -74,8 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(Cache::new(rds_conn, pg_pool));
     let upstream = UpstreamPool::new(UpstreamConfig::default());
     let handler = Arc::new(QueryHandler::new(cache.clone(), upstream));
-
-
+    cache.read_blocklist_db_memory().await;
     let config = dns::ServerConfig {
         bind_addr: cli.bind.parse()?,
         ..Default::default()
