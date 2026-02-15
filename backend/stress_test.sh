@@ -1,10 +1,8 @@
 #!/bin/bash
-# stress_test.sh - Prove resume claims
 
 SERVER="127.0.0.1"
 PORT="5354"
 
-# --- 50k+ queries/second test ---
 throughput_test() {
     echo "=== Throughput Test (Target: 50k qps) ==="
     
@@ -37,7 +35,6 @@ throughput_test() {
     fi
 }
 
-# --- Sub-millisecond p99 latency test ---
 latency_test() {
     echo ""
     echo "=== Latency Test (Target: <1ms p99) ==="
@@ -74,7 +71,6 @@ latency_test() {
     fi
 }
 
-# --- Cache hit rate test ---
 cache_test() {
     echo ""
     echo "=== Cache Hit Rate Test (Target: 85%) ==="
@@ -90,12 +86,10 @@ cache_test() {
     
     sleep 1
     
-    # Run queries and check latency (cache hit = fast)
     for i in $(seq 1 $queries); do
         domain=${domains[$((i % ${#domains[@]}))]}
         latency=$(dig @$SERVER -p $PORT $domain +timeout=1 2>/dev/null | grep "Query time:" | awk '{print $4}')
         
-        # Assume <5ms is cache hit
         if [[ $latency -lt 5 ]]; then
             ((cache_hits++))
         fi
@@ -113,7 +107,6 @@ cache_test() {
     fi
 }
 
-# --- Blocklist effectiveness test ---
 blocklist_test() {
     echo ""
     echo "=== Blocklist Test ==="
@@ -162,7 +155,6 @@ blocklist_test() {
     echo "Allowed: $allowed_count/${#allowed_domains[@]}"
 }
 
-# --- Concurrent connection stress test ---
 concurrency_test() {
     echo ""
     echo "=== Concurrency Test ==="
@@ -187,40 +179,6 @@ concurrency_test() {
     echo "Effective rate: $(echo "$concurrent / $elapsed" | bc) qps"
 }
 
-# --- Sustained load test ---
-sustained_test() {
-    echo ""
-    echo "=== Sustained Load Test (60 seconds) ==="
-    
-    local duration=60
-    local rate=1000  # target qps
-    local total=0
-    local errors=0
-    
-    local end_time=$(($(date +%s) + duration))
-    
-    while [[ $(date +%s) -lt $end_time ]]; do
-        for i in $(seq 1 100); do
-            result=$(dig @$SERVER -p $PORT google.com +short +timeout=1 2>/dev/null)
-            if [[ -n "$result" ]]; then
-                ((total++))
-            else
-                ((errors++))
-            fi
-        done &
-    done
-    
-    wait
-    
-    local success_rate=$(echo "scale=2; ($total - $errors) * 100 / $total" | bc)
-    
-    echo "Total queries: $total"
-    echo "Errors: $errors"
-    echo "Success rate: ${success_rate}%"
-    echo "Avg throughput: $(echo "$total / $duration" | bc) qps"
-}
-
-# --- Run all tests ---
 run_all() {
     echo "╔════════════════════════════════════════╗"
     echo "║     DNS Analytics Proxy Stress Test    ║"
@@ -233,7 +191,6 @@ run_all() {
     cache_test
     blocklist_test
     concurrency_test
-    # sustained_test  # uncomment for long test
     
     echo ""
     echo "=== All Tests Complete ==="
