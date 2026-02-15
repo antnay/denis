@@ -37,8 +37,6 @@ impl Default for UpstreamConfig {
 #[derive(Debug, Clone)]
 pub struct UpstreamResponse {
     pub code: ResponseCode,
-    // pub cached: bool,
-    // pub blocked: bool,
     pub raw: Vec<u8>,
 }
 
@@ -60,8 +58,6 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NoError,
-            // cached: true,
-            // blocked: false,
             raw,
         }
     }
@@ -83,8 +79,6 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NXDomain,
-            // cached: false,
-            // blocked: true,
             raw,
         }
     }
@@ -172,11 +166,6 @@ impl UpstreamPool {
             ResponseCode::ServFail
         };
 
-        Ok(UpstreamResponse {
-            code: code,
-            // cached: false,
-            // blocked: false,
-            raw: bytes,
-        })
+        Ok(UpstreamResponse { code, raw: bytes })
     }
 }

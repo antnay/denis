@@ -68,14 +68,15 @@ impl QueryHandler {
                     debug!("blocked");
                     info!("total time: {:?}", total.elapsed());
                 }
-                return Ok(UpstreamResponse::nxdomain(&query).raw);
+                Ok(UpstreamResponse::nxdomain(&query).raw)
             }
             (false, Some(cached)) => {
                 if cfg!(debug_assertions) {
                     debug!("cached");
                     info!("total time: {:?}", total.elapsed());
                 }
-                return Ok(UpstreamResponse::cached(&query, cached).raw);
+                let _ = self.cache.add_dns_query_moka(&query, &cached).await;
+                Ok(UpstreamResponse::cached(&query, cached).raw)
             }
             (false, None) => {
                 let begin = Instant::now();
@@ -96,10 +97,11 @@ impl QueryHandler {
                 //         let _ = cache.add_query(&query_clone, &raw, ttl).await;
                 //     });
                 // }
-                //
+
                 if res.code == ResponseCode::NoError {
                     let ttl = Parser::parse_ttl(&res.raw, query.answer_offset);
-                    let _ = self.cache.add_dns_query(&query, &res.raw, ttl).await;
+                    let _ = self.cache.add_dns_query_moka(&query, &res.raw).await;
+                    let _ = self.cache.add_dns_query_redis(&query, &res.raw, ttl).await;
                 }
                 if cfg!(debug_assertions) {
                     info!("total time: {:?}", total.elapsed());

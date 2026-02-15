@@ -9,7 +9,7 @@ use sqlx::postgres;
 use std::sync::Arc;
 
 use crate::{
-    dns::{Server, ServerConfig},
+    dns::Server,
     handler::{QueryHandler, UpstreamConfig, UpstreamPool},
     repo::{Cache, PGConfig, RedisConfig},
 };
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "
         CREATE TABLE IF NOT EXISTS allowed (
             id SERIAL PRIMARY KEY, 
-            domain VARCHAR(50) NOT NULL
+            domain VARCHAR(50) NOT NULL UNIQUE
         )
         ",
     )
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         CREATE TABLE IF NOT EXISTS blocked ( 
             id SERIAL PRIMARY KEY,
             list VARCHAR(50),
-            domain VARCHAR(50) NOT NULL 
+            domain VARCHAR(50) NOT NULL UNIQUE
         )
         ",
     )
@@ -75,20 +75,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upstream = UpstreamPool::new(UpstreamConfig::default());
     let handler = Arc::new(QueryHandler::new(cache.clone(), upstream));
 
-    // todo: get rid of me
-    cache.add_block_domain("", "ads.google.com").await?;
-    cache.add_block_domain("", "doubleclick.net").await?;
-    cache.add_block_domain("", "tracking.facebook.com").await?;
-    cache.add_block_domain("", "analytics.google.com").await?;
-    cache.add_block_domain("", "ad.doubleclick.net").await?;
 
-    let mut config = ServerConfig::default();
-    config.bind_addr = cli.bind.parse()?;
+    let config = dns::ServerConfig {
+        bind_addr: cli.bind.parse()?,
+        ..Default::default()
+    };
     let dns_server = Server::new(config, handler);
     // axum
-    if cfg!(debug_assertions) {
-        info!("Starting dns server on {}", cli.bind);
-    }
+    info!("Starting dns server on {}", cli.bind);
     if let Err(e) = dns_server.run().await {
         error!("Server error: {}", e);
         std::process::exit(1);

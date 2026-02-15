@@ -63,8 +63,8 @@ impl Parser {
                 }
                 ParseState::Scan => {
                     let stop = idx + len as usize;
-                    for i in idx..stop {
-                        buf.push(data[i as usize]);
+                    for byte in data.iter().take(stop).skip(idx) {
+                        buf.push(*byte);
                     }
                     idx += len as usize;
 
