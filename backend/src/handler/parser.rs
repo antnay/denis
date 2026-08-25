@@ -54,7 +54,6 @@ impl Parser {
         let mut buf = Vec::with_capacity(64);
 
         loop {
-            // Every read of `data[idx]` is guarded here.
             let byte = *data.get(idx).ok_or(ParseError::Truncated)?;
             if byte == 0x00 {
                 break;

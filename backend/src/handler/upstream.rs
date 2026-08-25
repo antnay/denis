@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use crossbeam_queue::ArrayQueue;
 use ftlog::debug;
 use hickory_proto::op::ResponseCode;
 use tokio::{
@@ -11,6 +12,9 @@ use crate::{
     config::{BlockingMode, RuntimeConfig, SharedConfig},
     handler::query::Query,
 };
+
+const POOL_SIZE: usize = 256;
+const RECV_BUF: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct UpstreamResponse {
@@ -143,11 +147,18 @@ impl From<Elapsed> for UpstreamError {
 
 pub struct UpstreamPool {
     config: SharedConfig,
+    sockets: ArrayQueue<UdpSocket>,
 }
 
 impl UpstreamPool {
-    pub fn new(config: SharedConfig) -> Self {
-        Self { config }
+    pub async fn new(config: SharedConfig) -> Self {
+        let sockets = ArrayQueue::new(POOL_SIZE);
+        for _ in 0..POOL_SIZE {
+            if let Ok(sock) = UdpSocket::bind("0.0.0.0:0").await {
+                let _ = sockets.push(sock);
+            }
+        }
+        Self { config, sockets }
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, UpstreamError> {
@@ -179,14 +190,43 @@ impl UpstreamPool {
         query: &Query,
         query_timeout: Duration,
     ) -> Result<UpstreamResponse, UpstreamError> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        socket.connect(server).await?;
-        socket.send(&query.raw).await?;
-        let mut buf = vec![0u8; 4096];
-        let len = timeout(query_timeout, socket.recv(&mut buf)).await??;
+        let socket = match self.sockets.pop() {
+            Some(sock) => sock,
+            None => UdpSocket::bind("0.0.0.0:0").await?,
+        };
+
+        let result = self.exchange(&socket, server, query, query_timeout).await;
+
+        if result.is_ok() {
+            let _ = self.sockets.push(socket);
+        }
+        result
+    }
+
+    async fn exchange(
+        &self,
+        socket: &UdpSocket,
+        server: &SocketAddr,
+        query: &Query,
+        query_timeout: Duration,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        socket.send_to(&query.raw, server).await?;
+        let txid = [query.raw[0], query.raw[1]];
+
+        let mut buf = [0u8; RECV_BUF];
+        let len = timeout(query_timeout, async {
+            loop {
+                let (len, src) = socket.recv_from(&mut buf).await?;
+                if src == *server && len >= 2 && buf[0] == txid[0] && buf[1] == txid[1] {
+                    return Ok::<usize, std::io::Error>(len);
+                }
+            }
+        })
+        .await??;
+
         let bytes = buf[..len].to_vec();
-        let code = if bytes.len() >= 4 {
-            match bytes[3] & 0x0F {
+        let code = if len >= 4 {
+            match buf[3] & 0x0F {
                 0 => ResponseCode::NoError,
                 2 => ResponseCode::ServFail,
                 3 => ResponseCode::NXDomain,

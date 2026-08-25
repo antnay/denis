@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cache.read_blocklist_db_memory().await;
     cache.read_allowlist_db_memory().await;
 
-    let upstream = UpstreamPool::new(runtime_config.clone());
+    let upstream = UpstreamPool::new(runtime_config.clone()).await;
     let handler = Arc::new(QueryHandler::new(
         cache.clone(),
         upstream,

@@ -595,6 +595,7 @@ dependencies = [
  "bytes",
  "clap",
  "clickhouse",
+ "crossbeam-queue",
  "deadpool-redis",
  "ftlog",
  "heapless",
