@@ -1,13 +1,19 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use bytes::BytesMut;
 use ftlog::{error, info};
 use tokio::{
-    net::{TcpListener, UdpSocket},
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::Mutex,
+    time::timeout,
 };
 
 use crate::{dns::ServerConfig, handler::QueryHandler};
+
+// RFC 7766: maximum DNS message size over TCP is 65535 (2-byte length prefix)
+const TCP_MAX_MSG: usize = 65535;
+const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
@@ -17,11 +23,9 @@ pub enum ServerError {
     BindTcp(String, std::io::Error),
     #[error("socket error: {0}")]
     Socket(std::io::Error),
-    // #[error("unknown server error")]
-    // Unknown,
 }
 
-// todo: use disruspter
+// todo: use disruptor
 #[derive(Debug)]
 pub struct BufferPool {
     pool: Mutex<Vec<BytesMut>>,
@@ -75,16 +79,16 @@ impl Server {
         let udp = UdpSocket::bind(self.config.bind_addr)
             .await
             .map_err(|e| ServerError::BindUdp(self.config.bind_addr.to_string(), e))?;
-        let _tcp = TcpListener::bind(self.config.bind_addr)
+        let tcp = TcpListener::bind(self.config.bind_addr)
             .await
             .map_err(|e| ServerError::BindTcp(self.config.bind_addr.to_string(), e))?;
 
         if cfg!(debug_assertions) {
-            info!("server running: {}", self.config.bind_addr);
+            info!("server running on {}", self.config.bind_addr);
         }
         tokio::select! {
-            r = self.serve_udp(udp) => {r},
-            // r = self.serve_tcp(tcp) => {r},
+            r = self.serve_udp(udp) => r,
+            r = self.serve_tcp(tcp) => r,
         }
     }
 
@@ -104,31 +108,82 @@ impl Server {
 
             let handler = Arc::clone(&self.handler);
             let socket = Arc::clone(&socket);
-
             let pool = Arc::clone(&self.buffer_pool);
 
             buf.truncate(len);
 
             tokio::spawn(async move {
                 let result = handler.handle(&buf).await;
-
                 pool.put(buf).await;
-
                 match result {
                     Ok(res) => {
                         if let Err(e) = socket.send_to(&res, src).await {
                             error!("cannot send udp: {}", e);
                         }
                     }
-                    Err(e) => {
-                        error!("query handling failed: {}", e);
-                    }
+                    Err(e) => error!("query handling failed: {}", e),
                 }
             });
         }
     }
 
-    // async fn serve_tcp(&self, socket: TcpListener) -> Result<(), ServerError> {
-    //     todo!("serve tcp")
-    // }
+    async fn serve_tcp(&self, listener: TcpListener) -> Result<(), ServerError> {
+        if cfg!(debug_assertions) {
+            info!("tcp server running");
+        }
+        loop {
+            let (stream, src) = listener.accept().await.map_err(ServerError::Socket)?;
+            let handler = Arc::clone(&self.handler);
+            tokio::spawn(async move {
+                if cfg!(debug_assertions) {
+                    info!("tcp connection from {}", src);
+                }
+                if let Err(e) = handle_tcp_conn(stream, handler).await {
+                    error!("tcp connection error from {}: {}", src, e);
+                }
+            });
+        }
+    }
+}
+
+// Handles a single TCP connection for its lifetime. A client may send multiple
+// queries on the same connection (RFC 7766 pipelining). Each message is framed
+// with a 2-byte big-endian length prefix before the DNS payload.
+async fn handle_tcp_conn(
+    mut stream: TcpStream,
+    handler: Arc<QueryHandler>,
+) -> Result<(), std::io::Error> {
+    let mut len_buf = [0u8; 2];
+
+    loop {
+        // Apply idle timeout per read so stale connections don't leak tasks.
+        match timeout(TCP_IDLE_TIMEOUT, stream.read_exact(&mut len_buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => break, // idle timeout — close cleanly
+        }
+
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+        if msg_len == 0 || msg_len > TCP_MAX_MSG {
+            break;
+        }
+
+        let mut msg = vec![0u8; msg_len];
+        stream.read_exact(&mut msg).await?;
+
+        match handler.handle(&msg).await {
+            Ok(response) => {
+                let resp_len = (response.len() as u16).to_be_bytes();
+                stream.write_all(&resp_len).await?;
+                stream.write_all(&response).await?;
+            }
+            Err(e) => {
+                error!("tcp query handling failed: {}", e);
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }

@@ -1,22 +1,4 @@
 services:
-  # denis:
-  #   build: ./backend
-  #   ports:
-  #     - "53:53/udp"
-  #     - "53:53/tcp"
-  #     - "8080:8080"
-  #   environment:
-  #     - REDIS_URL=redis://redis:6379
-  #   depends_on:
-  #     - redis
-
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis_data:/data
-  
   db:
     image: postgres:18.1-alpine3.23
     restart: always
@@ -39,7 +21,76 @@ services:
     volumes:
       - cache_data:/data
 
+  kafka:
+    image: apache/kafka:3.7.0
+    ports:
+      - "9092:9092"   # EXTERNAL listener — host / test-script access
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      # PLAINTEXT = internal Docker networking on port 29092
+      # EXTERNAL  = host access on port 9092
+      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  denis:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "8080:8080"
+    command:
+      - --bind
+      - 0.0.0.0:53
+      - --api-bind
+      - 0.0.0.0:8080
+      - --kafka-brokers
+      - kafka:29092
+      - --clickhouse-url
+      - http://clickhouse:8123
+      - --clickhouse-user
+      - default
+      - --clickhouse-password
+      - clickhouse
+    depends_on:
+      - db
+      - cache
+      - kafka
+      - clickhouse
+    environment:
+      - REDIS_URL=redis://cache:6379
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/denis
+
 volumes:
-  # redis_data:
   db_data:
   cache_data:
+  kafka_data:
+  clickhouse_data:

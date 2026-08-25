@@ -10,7 +10,8 @@ pub struct PGConfig {
 impl Default for PGConfig {
     fn default() -> Self {
         Self {
-            url: "postgresql://postgres:postgres@localhost:5433/denis".into(),
+            url: std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5433/denis".into()),
             max_connections: 16,
             idle_timeout: Duration::from_secs(5),
         }

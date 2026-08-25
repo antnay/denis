@@ -1,3 +1,5 @@
+mod analytics;
+mod api;
 mod dns;
 mod handler;
 mod repo;
@@ -9,6 +11,8 @@ use sqlx::postgres;
 use std::sync::Arc;
 
 use crate::{
+    analytics::{AnalyticsConsumer, AnalyticsProducer, StatsClient},
+    api::ApiState,
     dns::Server,
     handler::{QueryHandler, UpstreamConfig, UpstreamPool},
     repo::{Cache, PGConfig, RedisConfig},
@@ -19,6 +23,21 @@ use crate::{
 struct Cli {
     #[arg(short, long, default_value = "0.0.0.0:53")]
     bind: String,
+
+    #[arg(long, default_value = "0.0.0.0:8080")]
+    api_bind: String,
+
+    #[arg(long, default_value = "localhost:9092")]
+    kafka_brokers: String,
+
+    #[arg(long, default_value = "http://localhost:8123")]
+    clickhouse_url: String,
+
+    #[arg(long, default_value = "default")]
+    clickhouse_user: String,
+
+    #[arg(long, default_value = "clickhouse")]
+    clickhouse_password: String,
 }
 
 #[tokio::main]
@@ -27,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(debug_assertions) {
         let _guard = ftlog::builder()
             .max_log_level(ftlog::LevelFilter::Trace)
-            // .max_log_level(ftlog::LevelFilter::Error)
             .try_init()
             .unwrap();
     }
@@ -49,8 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = sqlx::query(
         "
         CREATE TABLE IF NOT EXISTS allowed (
-            id SERIAL PRIMARY KEY, 
-            domain VARCHAR(50) NOT NULL UNIQUE
+            id SERIAL PRIMARY KEY,
+            domain VARCHAR(253) NOT NULL UNIQUE
         )
         ",
     )
@@ -60,10 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = sqlx::query(
         "
-        CREATE TABLE IF NOT EXISTS blocked ( 
+        CREATE TABLE IF NOT EXISTS blocked (
             id SERIAL PRIMARY KEY,
             list VARCHAR(50),
-            domain VARCHAR(50) NOT NULL UNIQUE
+            domain VARCHAR(253) NOT NULL UNIQUE
         )
         ",
     )
@@ -71,17 +89,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .expect("failed to create blocked table");
 
+    let analytics_producer = Arc::new(AnalyticsProducer::new(&cli.kafka_brokers));
+    let analytics_consumer = AnalyticsConsumer::new(
+        &cli.kafka_brokers,
+        "denis-analytics",
+        &cli.clickhouse_url,
+        &cli.clickhouse_user,
+        &cli.clickhouse_password,
+    );
+    tokio::spawn(analytics_consumer.run());
+
     let cache = Arc::new(Cache::new(rds_conn, pg_pool));
-    let upstream = UpstreamPool::new(UpstreamConfig::default());
-    let handler = Arc::new(QueryHandler::new(cache.clone(), upstream));
     cache.read_blocklist_db_memory().await;
+
+    let upstream = UpstreamPool::new(UpstreamConfig::default());
+    let handler = Arc::new(QueryHandler::new(cache.clone(), upstream, analytics_producer));
+
+    let stats_client = Arc::new(StatsClient::new(
+        &cli.kafka_brokers,
+        &cli.clickhouse_url,
+        &cli.clickhouse_user,
+        &cli.clickhouse_password,
+    ));
+    let api_router = api::router(ApiState { cache: cache.clone(), stats: stats_client });
+    let api_bind = cli.api_bind.clone();
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(&api_bind)
+            .await
+            .expect("Cannot bind API listener");
+        info!("Management API listening on {}", api_bind);
+        axum::serve(listener, api_router)
+            .await
+            .expect("API server error");
+    });
+
     let config = dns::ServerConfig {
         bind_addr: cli.bind.parse()?,
         ..Default::default()
     };
     let dns_server = Server::new(config, handler);
-    // axum
-    info!("Starting dns server on {}", cli.bind);
+    info!("Starting DNS server on {}", cli.bind);
     if let Err(e) = dns_server.run().await {
         error!("Server error: {}", e);
         std::process::exit(1);

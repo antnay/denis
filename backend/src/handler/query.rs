@@ -1,9 +1,14 @@
-use std::{string::ParseError, sync::Arc, time::Instant};
+use std::{
+    string::ParseError,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use ftlog::{debug, info};
 use hickory_proto::op::ResponseCode;
 
 use crate::{
+    analytics::{AnalyticsProducer, DnsQueryEvent},
     handler::{Parser, UpstreamError, UpstreamPool, UpstreamResponse},
     repo::{Cache, CacheError},
 };
@@ -47,15 +52,21 @@ pub struct Query {
 pub struct QueryHandler {
     cache: Arc<Cache>,
     upstream: UpstreamPool,
+    analytics: Arc<AnalyticsProducer>,
 }
 
 impl QueryHandler {
-    pub fn new(cache: Arc<Cache>, upstream: UpstreamPool) -> Self {
-        Self { cache, upstream }
+    pub fn new(cache: Arc<Cache>, upstream: UpstreamPool, analytics: Arc<AnalyticsProducer>) -> Self {
+        Self { cache, upstream, analytics }
     }
 
     pub async fn handle(&self, data: &[u8]) -> Result<Vec<u8>, HandlerError> {
         let total = Instant::now();
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         let query = Parser::parse_udp(data).await;
         let delta = total.elapsed();
         if cfg!(debug_assertions) {
@@ -68,6 +79,15 @@ impl QueryHandler {
                     debug!("blocked");
                     info!("total time: {:?}", total.elapsed());
                 }
+                self.analytics.send(DnsQueryEvent {
+                    timestamp_ms,
+                    domain: query.name.clone(),
+                    query_type: query.query_type.to_string(),
+                    response_code: ResponseCode::NXDomain.to_string(),
+                    cache_hit: false,
+                    blocked: true,
+                    latency_us: total.elapsed().as_micros() as u64,
+                });
                 Ok(UpstreamResponse::nxdomain(&query).raw)
             }
             (false, Some(cached)) => {
@@ -75,6 +95,15 @@ impl QueryHandler {
                     debug!("cached");
                     info!("total time: {:?}", total.elapsed());
                 }
+                self.analytics.send(DnsQueryEvent {
+                    timestamp_ms,
+                    domain: query.name.clone(),
+                    query_type: query.query_type.to_string(),
+                    response_code: ResponseCode::NoError.to_string(),
+                    cache_hit: true,
+                    blocked: false,
+                    latency_us: total.elapsed().as_micros() as u64,
+                });
                 let _ = self.cache.add_dns_query_moka(&query, &cached).await;
                 Ok(UpstreamResponse::cached(&query, cached).raw)
             }
@@ -85,18 +114,16 @@ impl QueryHandler {
                 if cfg!(debug_assertions) {
                     info!("resolve time: {:?}", delta);
                 }
-                // handle better
-                // if res.code == ResponseCode::NoError {
-                //     let cache = self.cache.clone();
-                //     let query_clone = query.clone();
-                //     let raw = res.raw.clone();
-                //     let answer_offset = query.answer_offset;
-                //
-                //     tokio::spawn(async move {
-                //         let ttl = Resolver::parse_ttl(&raw, answer_offset);
-                //         let _ = cache.add_query(&query_clone, &raw, ttl).await;
-                //     });
-                // }
+
+                self.analytics.send(DnsQueryEvent {
+                    timestamp_ms,
+                    domain: query.name.clone(),
+                    query_type: query.query_type.to_string(),
+                    response_code: res.code.to_string(),
+                    cache_hit: false,
+                    blocked: false,
+                    latency_us: total.elapsed().as_micros() as u64,
+                });
 
                 if res.code == ResponseCode::NoError {
                     let ttl = Parser::parse_ttl(&res.raw, query.answer_offset);

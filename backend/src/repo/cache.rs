@@ -1,6 +1,7 @@
 use core::fmt::Write;
-use ftlog::{debug, error, info};
+use ftlog::{debug, info};
 use redis::RedisError;
+use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, time::Instant};
@@ -28,6 +29,13 @@ impl From<redis::RedisError> for CacheError {
     }
 }
 
+#[derive(Serialize)]
+pub struct CacheStats {
+    pub block_list_size: usize,
+    pub allow_list_size: usize,
+    pub l1_entry_count: u64,
+}
+
 pub struct Cache {
     l1: moka::future::Cache<String, Vec<u8>>,
     allow_list: Arc<RwLock<HashSet<String>>>,
@@ -49,18 +57,6 @@ impl Cache {
             pg_pool,
         }
     }
-
-    // pub async fn get_query(&self, query: &Query) -> Result<Option<Vec<u8>>, CacheError> {
-    //     let mut conn = self.pool.get().await?;
-    //     let key = self.query_key(&query);
-    //     let res = cmd("GET")
-    //         .arg(&key)
-    //         .query_async::<Option<Vec<u8>>>(&mut conn)
-    //         .await
-    //         .map_err(|e| CacheError::Get(e, key))?;
-    //     Ok(res)
-    // }
-    //
 
     pub async fn add_dns_query_redis(&self, query: &Query, response: &[u8], ttl: u32) {
         let begin = Instant::now();
@@ -152,34 +148,65 @@ impl Cache {
         let _ = write!(buf, "dns:{}:{}", query.name, query.query_type);
     }
 
-    pub async fn add_allow_domain(&self, list: &str, domain: &str) -> Result<(), CacheError> {
+    pub async fn add_allow_domain(&self, domain: &str) -> Result<(), CacheError> {
         let lower = domain.to_lowercase();
-        let mut local = self.block_list.write().await;
-        local.insert(lower.clone());
+        self.allow_list.write().await.insert(lower.clone());
 
-        sqlx::query("INSERT INTO allowed (domain) VALUES ($1, $2)")
-            .bind(list)
-            .bind(domain)
-            .execute(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)?;
+        sqlx::query(
+            "INSERT INTO allowed (domain) VALUES ($1) ON CONFLICT (domain) DO NOTHING",
+        )
+        .bind(&lower)
+        .execute(&self.pg_pool)
+        .await
+        .map_err(CacheError::Sql)?;
 
         Ok(())
     }
 
     pub async fn add_block_domain(&self, list: &str, domain: &str) -> Result<(), CacheError> {
         let lower = domain.to_lowercase();
-        let mut local = self.block_list.write().await;
-        local.insert(lower.clone());
+        self.block_list.write().await.insert(lower.clone());
 
-        sqlx::query("INSERT INTO blocked (list, domain) VALUES ($1, $2)")
-            .bind(list)
-            .bind(domain)
+        sqlx::query(
+            "INSERT INTO blocked (list, domain) VALUES ($1, $2) ON CONFLICT (domain) DO NOTHING",
+        )
+        .bind(list)
+        .bind(&lower)
+        .execute(&self.pg_pool)
+        .await
+        .map_err(CacheError::Sql)?;
+
+        Ok(())
+    }
+
+    pub async fn remove_block_domain(&self, domain: &str) -> Result<bool, CacheError> {
+        let lower = domain.to_lowercase();
+        let removed = self.block_list.write().await.remove(&lower);
+
+        sqlx::query("DELETE FROM blocked WHERE domain = $1")
+            .bind(&lower)
             .execute(&self.pg_pool)
             .await
             .map_err(CacheError::Sql)?;
 
-        Ok(())
+        Ok(removed)
+    }
+
+    pub async fn list_block_domains(&self) -> Result<Vec<String>, CacheError> {
+        let domains =
+            sqlx::query_scalar::<_, String>("SELECT domain FROM blocked ORDER BY domain")
+                .fetch_all(&self.pg_pool)
+                .await
+                .map_err(CacheError::Sql)?;
+        Ok(domains)
+    }
+
+    pub async fn stats(&self) -> CacheStats {
+        CacheStats {
+            block_list_size: self.block_list.read().await.len(),
+            allow_list_size: self.allow_list.read().await.len(),
+            l1_entry_count: self.l1.entry_count(),
+        }
     }
 
     pub async fn read_blocklist_db_memory(&self) {
