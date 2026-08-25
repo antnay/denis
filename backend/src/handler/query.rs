@@ -113,7 +113,7 @@ impl QueryHandler {
                 if let Some(ttl) = cache_ttl(&self.config.load(), &cached, query.answer_offset) {
                     self.cache.add_dns_query_moka(&query, &cached, ttl).await;
                 }
-                let response = UpstreamResponse::cached(&query, cached);
+                let response = UpstreamResponse::cached(&query, cached.to_vec());
                 Served {
                     response_code: u16::from(response.code),
                     raw: response.raw,

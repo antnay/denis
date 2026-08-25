@@ -52,11 +52,11 @@ pub struct AddOutcome {
 // SQL max insertion per transaction
 const INSERT_CHUNK: usize = 5_000;
 
-/// L1 value: the raw response plus its DNS TTL, so each entry expires on its own
-/// TTL (see [`TtlExpiry`]) rather than a blanket cache-wide duration.
+/// L1 value: the raw response (as `Arc<[u8]>` so a cache hit clones a refcount,
+/// not the bytes) plus its DNS TTL for per-entry expiry (see [`TtlExpiry`]).
 #[derive(Clone)]
 struct L1Entry {
-    raw: Vec<u8>,
+    raw: Arc<[u8]>,
     ttl: u32,
 }
 
@@ -142,7 +142,7 @@ impl Cache {
             .insert(
                 key,
                 L1Entry {
-                    raw: response.to_vec(),
+                    raw: Arc::from(response),
                     ttl,
                 },
             )
@@ -156,7 +156,7 @@ impl Cache {
         decide(&block, &allow, name)
     }
 
-    pub async fn l1_get(&self, query: &Query) -> Option<Vec<u8>> {
+    pub async fn l1_get(&self, query: &Query) -> Option<Arc<[u8]>> {
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, query);
         self.l1.get(buf.as_str()).await.map(|e| e.raw)
@@ -165,7 +165,7 @@ impl Cache {
     pub async fn check_and_get(
         &self,
         query: &Query,
-    ) -> Result<(bool, Option<Vec<u8>>), CacheError> {
+    ) -> Result<(bool, Option<Arc<[u8]>>), CacheError> {
         if self.is_blocked(&query.name) {
             if cfg!(debug_assertions) {
                 debug!("in memory block");
@@ -175,18 +175,17 @@ impl Cache {
 
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, query);
-        let key = buf.to_string();
 
-        if let Some(entry) = self.l1.get(&key).await {
+        if let Some(entry) = self.l1.get(buf.as_str()).await {
             return Ok((false, Some(entry.raw)));
         }
 
         let mut conn = self.rds_conn.clone();
         let res = redis::cmd("GET")
-            .arg(&key)
+            .arg(buf.as_str())
             .query_async::<Option<Vec<u8>>>(&mut conn)
             .await?;
-        Ok((false, res))
+        Ok((false, res.map(Arc::from)))
     }
 
     #[inline]

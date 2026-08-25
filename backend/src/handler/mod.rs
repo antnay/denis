@@ -4,4 +4,4 @@ mod upstream;
 
 pub use parser::{ParseError, Parser};
 pub use query::{Query, QueryHandler};
-pub use upstream::{UpstreamError, UpstreamPool, UpstreamResponse};
+pub use upstream::{UpstreamError, UpstreamPool, UpstreamResponse, rcode_from_raw};

@@ -12,7 +12,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::{
     analytics::{AnalyticsProducer, DnsQueryEvent},
     config::SharedConfig,
-    handler::{Parser, Query, UpstreamResponse},
+    handler::{Parser, Query, UpstreamResponse, rcode_from_raw},
     repo::Cache,
 };
 
@@ -156,17 +156,29 @@ impl Worker {
         }
 
         if let Some(cached) = self.cache.l1_get(&query).await {
-            let resp = UpstreamResponse::cached(&query, cached);
+            let Query {
+                name,
+                query_type,
+                mut raw,
+                ..
+            } = query;
+            let txid = [raw[0], raw[1]];
+            raw.clear();
+            raw.extend_from_slice(&cached);
+            if raw.len() >= 2 {
+                raw[0] = txid[0];
+                raw[1] = txid[1];
+            }
             self.analytics.send(DnsQueryEvent {
                 timestamp_ms,
-                domain: query.name,
-                query_type: u16::from(query.query_type),
-                response_code: u16::from(resp.code),
+                domain: name,
+                query_type: u16::from(query_type),
+                response_code: u16::from(rcode_from_raw(&raw)),
                 cache_hit: true,
                 blocked: false,
                 latency_us: total.elapsed().as_micros() as u64,
             });
-            return Outcome::Reply(resp.raw);
+            return Outcome::Reply(raw);
         }
 
         Outcome::Miss {
