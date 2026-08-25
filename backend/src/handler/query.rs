@@ -111,7 +111,11 @@ impl QueryHandler {
                     debug!("cached");
                 }
                 let latency_us = total.elapsed().as_micros() as u64;
-                self.cache.add_dns_query_moka(&query, &cached).await;
+                let ttl = self
+                    .config
+                    .load()
+                    .clamp_ttl(Parser::parse_ttl(&cached, query.answer_offset));
+                self.cache.add_dns_query_moka(&query, &cached, ttl).await;
                 Served {
                     response_code: u16::from(ResponseCode::NoError),
                     raw: UpstreamResponse::cached(&query, cached).raw,
@@ -129,7 +133,7 @@ impl QueryHandler {
                         .config
                         .load()
                         .clamp_ttl(Parser::parse_ttl(&res.raw, query.answer_offset));
-                    self.cache.add_dns_query_moka(&query, &res.raw).await;
+                    self.cache.add_dns_query_moka(&query, &res.raw, ttl).await;
                     self.cache.add_dns_query_redis(&query, &res.raw, ttl).await;
                 }
                 Served {

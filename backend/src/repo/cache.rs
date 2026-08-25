@@ -52,8 +52,39 @@ pub struct AddOutcome {
 // SQL max insertion per transaction
 const INSERT_CHUNK: usize = 5_000;
 
+/// L1 value: the raw response plus its DNS TTL, so each entry expires on its own
+/// TTL (see [`TtlExpiry`]) rather than a blanket cache-wide duration.
+#[derive(Clone)]
+struct L1Entry {
+    raw: Vec<u8>,
+    ttl: u32,
+}
+
+struct TtlExpiry;
+
+impl moka::Expiry<String, L1Entry> for TtlExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &String,
+        value: &L1Entry,
+        _now: std::time::Instant,
+    ) -> Option<Duration> {
+        Some(Duration::from_secs(value.ttl as u64))
+    }
+
+    fn expire_after_update(
+        &self,
+        _key: &String,
+        value: &L1Entry,
+        _now: std::time::Instant,
+        _current: Option<Duration>,
+    ) -> Option<Duration> {
+        Some(Duration::from_secs(value.ttl as u64))
+    }
+}
+
 pub struct Cache {
-    l1: moka::future::Cache<String, Vec<u8>>,
+    l1: moka::future::Cache<String, L1Entry>,
     allow_list: ArcSwap<DomainSet>,
     block_list: ArcSwap<DomainSet>,
     write_lock: Mutex<()>,
@@ -70,7 +101,7 @@ impl Cache {
         Self {
             l1: moka::future::Cache::builder()
                 .max_capacity(l1_capacity)
-                .time_to_live(Duration::from_mins(1))
+                .expire_after(TtlExpiry)
                 .build(),
             allow_list: ArcSwap::from_pointee(DomainSet::default()),
             block_list: ArcSwap::from_pointee(DomainSet::default()),
@@ -85,11 +116,12 @@ impl Cache {
     }
 
     pub async fn add_dns_query_redis(&self, query: &Query, response: &[u8], ttl: u32) {
+        if ttl == 0 {
+            return;
+        }
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, query);
         let key = buf.to_string();
-
-        self.l1.insert(key.clone(), response.to_vec()).await;
 
         let mut conn = self.rds_conn.clone();
         let _ = redis::cmd("SETEX")
@@ -101,12 +133,20 @@ impl Cache {
     }
 
     #[inline]
-    pub async fn add_dns_query_moka(&self, query: &Query, response: &[u8]) {
+    pub async fn add_dns_query_moka(&self, query: &Query, response: &[u8], ttl: u32) {
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, query);
         let key = buf.to_string();
 
-        self.l1.insert(key, response.to_vec()).await;
+        self.l1
+            .insert(
+                key,
+                L1Entry {
+                    raw: response.to_vec(),
+                    ttl,
+                },
+            )
+            .await;
     }
 
     #[inline]
@@ -119,7 +159,7 @@ impl Cache {
     pub async fn l1_get(&self, query: &Query) -> Option<Vec<u8>> {
         let mut buf: heapless::String<128> = heapless::String::new();
         self.query_key(&mut buf, query);
-        self.l1.get(buf.as_str()).await
+        self.l1.get(buf.as_str()).await.map(|e| e.raw)
     }
 
     pub async fn check_and_get(
@@ -137,8 +177,8 @@ impl Cache {
         self.query_key(&mut buf, query);
         let key = buf.to_string();
 
-        if let Some(res) = self.l1.get(&key).await {
-            return Ok((false, Some(res)));
+        if let Some(entry) = self.l1.get(&key).await {
+            return Ok((false, Some(entry.raw)));
         }
 
         let mut conn = self.rds_conn.clone();
@@ -266,20 +306,48 @@ impl Cache {
         target.store(Arc::new(new));
     }
 
-    pub async fn list_block_domains(&self) -> Result<Vec<String>, CacheError> {
-        let domains = sqlx::query_scalar::<_, String>("SELECT domain FROM blocked ORDER BY domain")
-            .fetch_all(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)?;
-        Ok(domains)
+    pub async fn list_block_domains(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<String>, CacheError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT domain FROM blocked ORDER BY domain LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pg_pool)
+        .await
+        .map_err(CacheError::Sql)
     }
 
-    pub async fn list_allow_domains(&self) -> Result<Vec<String>, CacheError> {
-        let domains = sqlx::query_scalar::<_, String>("SELECT domain FROM allowed ORDER BY domain")
-            .fetch_all(&self.pg_pool)
+    pub async fn count_block_domains(&self) -> Result<i64, CacheError> {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM blocked")
+            .fetch_one(&self.pg_pool)
             .await
-            .map_err(CacheError::Sql)?;
-        Ok(domains)
+            .map_err(CacheError::Sql)
+    }
+
+    pub async fn list_allow_domains(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<String>, CacheError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT domain FROM allowed ORDER BY domain LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pg_pool)
+        .await
+        .map_err(CacheError::Sql)
+    }
+
+    pub async fn count_allow_domains(&self) -> Result<i64, CacheError> {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM allowed")
+            .fetch_one(&self.pg_pool)
+            .await
+            .map_err(CacheError::Sql)
     }
 
     pub async fn stats(&self) -> CacheStats {
