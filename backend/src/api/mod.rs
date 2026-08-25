@@ -2,17 +2,22 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{analytics::StatsClient, repo::Cache};
+use crate::{
+    analytics::StatsClient,
+    config::{RuntimeConfig, RuntimeConfigPatch, SharedConfig},
+    repo::{AddOutcome, Cache, parse_domain_list},
+};
 
 #[derive(Clone)]
 pub struct ApiState {
     pub cache: Arc<Cache>,
     pub stats: Arc<StatsClient>,
+    pub config: SharedConfig,
 }
 
 #[derive(Deserialize)]
@@ -23,6 +28,29 @@ struct AddOneReq {
 #[derive(Deserialize)]
 struct AddBulkReq {
     domains: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AddUrlReq {
+    url: String,
+    list: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AddResult {
+    added: usize,
+    skipped: usize,
+    invalid: usize,
+}
+
+impl AddResult {
+    fn from_outcome(outcome: AddOutcome, total_input: usize) -> Self {
+        Self {
+            added: outcome.added,
+            skipped: outcome.considered - outcome.added,
+            invalid: total_input - outcome.considered,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -42,7 +70,18 @@ type ApiResult<T> = Result<T, (StatusCode, Json<ErrResp>)>;
 fn internal(e: impl std::fmt::Display) -> (StatusCode, Json<ErrResp>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrResp { error: e.to_string() }),
+        Json(ErrResp {
+            error: e.to_string(),
+        }),
+    )
+}
+
+fn bad_request(e: impl std::fmt::Display) -> (StatusCode, Json<ErrResp>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrResp {
+            error: e.to_string(),
+        }),
     )
 }
 
@@ -51,11 +90,35 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .route("/stats", get(stats))
         .route("/blocklist", get(list_blocked))
-        .route("/blocklist", post(add_one))
-        .route("/blocklist/bulk", post(add_bulk))
+        .route("/blocklist", post(block_add_one))
+        .route("/blocklist/bulk", post(block_add_bulk))
+        .route("/blocklist/url", post(block_add_url))
         .route("/blocklist/bulk/remove", post(remove_bulk))
         .route("/blocklist/:domain", delete(remove_one))
+        .route("/allowlist", get(list_allowed))
+        .route("/allowlist", post(allow_add_one))
+        .route("/allowlist/bulk", post(allow_add_bulk))
+        .route("/config", get(get_config))
+        .route("/config", patch(patch_config))
         .with_state(state)
+}
+
+async fn get_config(State(s): State<ApiState>) -> Json<RuntimeConfig> {
+    Json(RuntimeConfig::clone(&s.config.load()))
+}
+
+async fn patch_config(
+    State(s): State<ApiState>,
+    Json(patch): Json<RuntimeConfigPatch>,
+) -> ApiResult<Json<RuntimeConfig>> {
+    let merged = patch.apply_to(&s.config.load());
+
+    crate::config::persist(s.cache.pool(), &merged)
+        .await
+        .map_err(internal)?;
+
+    s.config.store(Arc::new(merged.clone()));
+    Ok(Json(merged))
 }
 
 async fn stats(State(s): State<ApiState>) -> Json<crate::analytics::AllStats> {
@@ -72,6 +135,8 @@ async fn health(State(s): State<ApiState>) -> Json<serde_json::Value> {
     }))
 }
 
+// ── Blocklist ─────────────────────────────────────────────────────────────
+
 async fn list_blocked(State(s): State<ApiState>) -> ApiResult<Json<Vec<String>>> {
     s.cache
         .list_block_domains()
@@ -80,41 +145,89 @@ async fn list_blocked(State(s): State<ApiState>) -> ApiResult<Json<Vec<String>>>
         .map_err(internal)
 }
 
-async fn add_one(
+async fn block_add_one(
     State(s): State<ApiState>,
     Json(req): Json<AddOneReq>,
-) -> ApiResult<StatusCode> {
-    s.cache
+) -> ApiResult<Json<AddResult>> {
+    let outcome = s
+        .cache
         .add_block_domain("custom", &req.domain)
         .await
-        .map(|_| StatusCode::CREATED)
+        .map_err(internal)?;
+    Ok(Json(AddResult::from_outcome(outcome, 1)))
+}
+
+async fn block_add_bulk(
+    State(s): State<ApiState>,
+    Json(req): Json<AddBulkReq>,
+) -> ApiResult<Json<AddResult>> {
+    let total = req.domains.len();
+    let outcome = s
+        .cache
+        .add_block_domains("custom", &req.domains)
+        .await
+        .map_err(internal)?;
+    Ok(Json(AddResult::from_outcome(outcome, total)))
+}
+
+/// Download a blocklist (hosts-file or domain-per-line) and import it.
+async fn block_add_url(
+    State(s): State<ApiState>,
+    Json(req): Json<AddUrlReq>,
+) -> ApiResult<Json<AddResult>> {
+    let body = reqwest::get(&req.url)
+        .await
+        .and_then(|r| r.error_for_status())
+        .map_err(bad_request)?
+        .text()
+        .await
+        .map_err(bad_request)?;
+
+    let domains = parse_domain_list(&body);
+    let total = domains.len();
+    let list = req.list.unwrap_or(req.url);
+
+    let outcome = s
+        .cache
+        .add_block_domains(&list, &domains)
+        .await
+        .map_err(internal)?;
+    Ok(Json(AddResult::from_outcome(outcome, total)))
+}
+
+// ── Allowlist ─────────────────────────────────────────────────────────────
+
+async fn list_allowed(State(s): State<ApiState>) -> ApiResult<Json<Vec<String>>> {
+    s.cache
+        .list_allow_domains()
+        .await
+        .map(Json)
         .map_err(internal)
 }
 
-async fn add_bulk(
+async fn allow_add_one(
+    State(s): State<ApiState>,
+    Json(req): Json<AddOneReq>,
+) -> ApiResult<Json<AddResult>> {
+    let outcome = s
+        .cache
+        .add_allow_domain(&req.domain)
+        .await
+        .map_err(internal)?;
+    Ok(Json(AddResult::from_outcome(outcome, 1)))
+}
+
+async fn allow_add_bulk(
     State(s): State<ApiState>,
     Json(req): Json<AddBulkReq>,
-) -> ApiResult<Json<BulkResult>> {
-    let mut added = 0usize;
-    let mut skipped = 0usize;
-    let mut errors: Vec<String> = Vec::new();
-
-    for domain in req.domains {
-        match s.cache.add_block_domain("custom", &domain).await {
-            Ok(_) => added += 1,
-            Err(e) => {
-                let msg = e.to_string();
-                // ON CONFLICT DO NOTHING means the row existed — count as skipped
-                if msg.contains("unique") || msg.contains("duplicate") {
-                    skipped += 1;
-                } else {
-                    errors.push(format!("{domain}: {msg}"));
-                }
-            }
-        }
-    }
-
-    Ok(Json(BulkResult { added, skipped, errors }))
+) -> ApiResult<Json<AddResult>> {
+    let total = req.domains.len();
+    let outcome = s
+        .cache
+        .add_allow_domains(&req.domains)
+        .await
+        .map_err(internal)?;
+    Ok(Json(AddResult::from_outcome(outcome, total)))
 }
 
 #[derive(Deserialize)]
@@ -126,7 +239,7 @@ async fn remove_bulk(
     State(s): State<ApiState>,
     Json(req): Json<RemoveBulkReq>,
 ) -> ApiResult<Json<BulkResult>> {
-    let mut added = 0usize; // reused as "removed"
+    let mut added = 0usize;
     let mut skipped = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
@@ -138,7 +251,11 @@ async fn remove_bulk(
         }
     }
 
-    Ok(Json(BulkResult { added, skipped, errors }))
+    Ok(Json(BulkResult {
+        added,
+        skipped,
+        errors,
+    }))
 }
 
 async fn remove_one(
@@ -149,7 +266,9 @@ async fn remove_one(
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err((
             StatusCode::NOT_FOUND,
-            Json(ErrResp { error: format!("{domain} not found in blocklist") }),
+            Json(ErrResp {
+                error: format!("{domain} not found in blocklist"),
+            }),
         )),
         Err(e) => Err(internal(e)),
     }

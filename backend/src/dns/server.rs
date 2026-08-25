@@ -11,7 +11,6 @@ use tokio::{
 
 use crate::{dns::ServerConfig, handler::QueryHandler};
 
-// RFC 7766: maximum DNS message size over TCP is 65535 (2-byte length prefix)
 const TCP_MAX_MSG: usize = 65535;
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -146,9 +145,6 @@ impl Server {
     }
 }
 
-// Handles a single TCP connection for its lifetime. A client may send multiple
-// queries on the same connection (RFC 7766 pipelining). Each message is framed
-// with a 2-byte big-endian length prefix before the DNS payload.
 async fn handle_tcp_conn(
     mut stream: TcpStream,
     handler: Arc<QueryHandler>,
@@ -156,12 +152,11 @@ async fn handle_tcp_conn(
     let mut len_buf = [0u8; 2];
 
     loop {
-        // Apply idle timeout per read so stale connections don't leak tasks.
         match timeout(TCP_IDLE_TIMEOUT, stream.read_exact(&mut len_buf)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Ok(Err(e)) => return Err(e),
-            Err(_) => break, // idle timeout — close cleanly
+            Err(_) => break,
         }
 
         let msg_len = u16::from_be_bytes(len_buf) as usize;

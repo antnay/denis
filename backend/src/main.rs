@@ -1,11 +1,13 @@
 mod analytics;
 mod api;
+mod cli;
+mod config;
 mod dns;
 mod handler;
 mod repo;
 
 use clap::Parser;
-use ftlog::{error, info};
+use ftlog::{LevelFilter, error, info};
 use redis::Client;
 use sqlx::postgres;
 use std::sync::Arc;
@@ -13,58 +15,39 @@ use std::sync::Arc;
 use crate::{
     analytics::{AnalyticsConsumer, AnalyticsProducer, StatsClient},
     api::ApiState,
+    cli::Cli,
+    config::RuntimeConfig,
     dns::Server,
-    handler::{QueryHandler, UpstreamConfig, UpstreamPool},
-    repo::{Cache, PGConfig, RedisConfig},
+    handler::{QueryHandler, UpstreamPool},
+    repo::Cache,
 };
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[arg(short, long, default_value = "0.0.0.0:53")]
-    bind: String,
-
-    #[arg(long, default_value = "0.0.0.0:8080")]
-    api_bind: String,
-
-    #[arg(long, default_value = "localhost:9092")]
-    kafka_brokers: String,
-
-    #[arg(long, default_value = "http://localhost:8123")]
-    clickhouse_url: String,
-
-    #[arg(long, default_value = "default")]
-    clickhouse_user: String,
-
-    #[arg(long, default_value = "clickhouse")]
-    clickhouse_password: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    if cfg!(debug_assertions) {
-        let _guard = ftlog::builder()
-            .max_log_level(ftlog::LevelFilter::Trace)
-            .try_init()
-            .unwrap();
-    }
 
-    let rds_config = RedisConfig::default();
-    let rds_conn = Client::open(rds_config.url)
+    let level = match cli.verbose {
+        0 => LevelFilter::Info,
+        1 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    };
+    let _guard = ftlog::builder()
+        .max_log_level(level)
+        .try_init()
+        .expect("failed to init logger");
+
+    let rds_conn = Client::open(cli.redis.redis_url.clone())
         .expect("Cannot connect to redis")
         .get_multiplexed_async_connection()
         .await?;
 
-    let pg_config = PGConfig::default();
     let pg_pool = postgres::PgPoolOptions::new()
-        .max_connections(pg_config.max_connections)
-        .idle_timeout(pg_config.idle_timeout)
-        .connect(&pg_config.url)
+        .max_connections(cli.postgres.pg_max_connections)
+        .connect(&cli.postgres.database_url)
         .await
         .expect("Cannot connect to postgres");
 
-    let _ = sqlx::query(
+    sqlx::query(
         "
         CREATE TABLE IF NOT EXISTS allowed (
             id SERIAL PRIMARY KEY,
@@ -76,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .expect("failed to create allowed table");
 
-    let _ = sqlx::query(
+    sqlx::query(
         "
         CREATE TABLE IF NOT EXISTS blocked (
             id SERIAL PRIMARY KEY,
@@ -89,32 +72,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .expect("failed to create blocked table");
 
-    let analytics_producer = Arc::new(AnalyticsProducer::new(&cli.kafka_brokers));
+    let runtime_config = config::load_or_init(&pg_pool, RuntimeConfig::from_cli(&cli))
+        .await
+        .expect("failed to load runtime config");
+
+    let analytics_producer = Arc::new(AnalyticsProducer::new(&cli.kafka.kafka_brokers));
     let analytics_consumer = AnalyticsConsumer::new(
-        &cli.kafka_brokers,
+        &cli.kafka.kafka_brokers,
         "denis-analytics",
-        &cli.clickhouse_url,
-        &cli.clickhouse_user,
-        &cli.clickhouse_password,
+        &cli.clickhouse.clickhouse_url,
+        &cli.clickhouse.clickhouse_user,
+        &cli.clickhouse.clickhouse_password,
     );
     tokio::spawn(analytics_consumer.run());
 
-    let cache = Arc::new(Cache::new(rds_conn, pg_pool));
+    let cache = Arc::new(Cache::new(rds_conn, pg_pool, cli.redis.cache_capacity));
     cache.read_blocklist_db_memory().await;
+    cache.read_allowlist_db_memory().await;
 
-    let upstream = UpstreamPool::new(UpstreamConfig::default());
-    let handler = Arc::new(QueryHandler::new(cache.clone(), upstream, analytics_producer));
+    let upstream = UpstreamPool::new(runtime_config.clone());
+    let handler = Arc::new(QueryHandler::new(
+        cache.clone(),
+        upstream,
+        analytics_producer,
+        runtime_config.clone(),
+    ));
 
     let stats_client = Arc::new(StatsClient::new(
-        &cli.kafka_brokers,
-        &cli.clickhouse_url,
-        &cli.clickhouse_user,
-        &cli.clickhouse_password,
+        &cli.kafka.kafka_brokers,
+        &cli.clickhouse.clickhouse_url,
+        &cli.clickhouse.clickhouse_user,
+        &cli.clickhouse.clickhouse_password,
     ));
-    let api_router = api::router(ApiState { cache: cache.clone(), stats: stats_client });
-    let api_bind = cli.api_bind.clone();
+    let api_router = api::router(ApiState {
+        cache: cache.clone(),
+        stats: stats_client,
+        config: runtime_config.clone(),
+    });
+    let api_bind = cli.api.api_bind;
     tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(&api_bind)
+        let listener = tokio::net::TcpListener::bind(api_bind)
             .await
             .expect("Cannot bind API listener");
         info!("Management API listening on {}", api_bind);
@@ -123,12 +120,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("API server error");
     });
 
-    let config = dns::ServerConfig {
-        bind_addr: cli.bind.parse()?,
-        ..Default::default()
+    let server_config = dns::ServerConfig {
+        bind_addr: cli.dns.dns_bind,
+        udp_buffer_size: dns::UDP_BUFFER_SIZE,
+        udp_buffer_count: dns::UDP_BUFFER_COUNT,
     };
-    let dns_server = Server::new(config, handler);
-    info!("Starting DNS server on {}", cli.bind);
+    let dns_server = Server::new(server_config, handler);
+    info!("Starting DNS server on {}", cli.dns.dns_bind);
     if let Err(e) = dns_server.run().await {
         error!("Server error: {}", e);
         std::process::exit(1);

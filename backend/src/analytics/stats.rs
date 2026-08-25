@@ -38,10 +38,7 @@ struct RespCodeRow {
 pub struct KafkaStats {
     pub topic: String,
     pub partitions: i32,
-    /// High-watermark sum across all partitions (total messages ever produced
-    /// minus any that fell off the retention window).
     pub total_messages: i64,
-    /// How many messages the analytics consumer has not yet flushed to ClickHouse.
     pub consumer_lag: i64,
 }
 
@@ -95,8 +92,7 @@ impl StatsClient {
     }
 
     pub async fn get_stats(&self) -> AllStats {
-        let (kafka, clickhouse) =
-            tokio::join!(self.kafka_stats(), self.clickhouse_stats());
+        let (kafka, clickhouse) = tokio::join!(self.kafka_stats(), self.clickhouse_stats());
         AllStats { kafka, clickhouse }
     }
 
@@ -113,45 +109,44 @@ impl StatsClient {
     }
 
     async fn clickhouse_stats(&self) -> ClickHouseStats {
-        let (total, hit_rate, blocked, avg_lat, last_hour, last_24h, domains, codes) =
-            tokio::join!(
-                u64_query(&self.ch, "SELECT count() AS value FROM dns_queries"),
-                f64_query(
-                    &self.ch,
-                    "SELECT ifNull(toFloat64(round(
+        let (total, hit_rate, blocked, avg_lat, last_hour, last_24h, domains, codes) = tokio::join!(
+            u64_query(&self.ch, "SELECT count() AS value FROM dns_queries"),
+            f64_query(
+                &self.ch,
+                "SELECT ifNull(toFloat64(round(
                         100.0 * countIf(cache_hit = 1) / nullIf(toFloat64(count()), 0)
                     , 2)), 0) AS value FROM dns_queries",
-                ),
-                u64_query(
-                    &self.ch,
-                    "SELECT countIf(blocked = 1) AS value FROM dns_queries",
-                ),
-                f64_query(
-                    &self.ch,
-                    "SELECT ifNull(toFloat64(round(avg(latency_us), 2)), 0) AS value
+            ),
+            u64_query(
+                &self.ch,
+                "SELECT countIf(blocked = 1) AS value FROM dns_queries",
+            ),
+            f64_query(
+                &self.ch,
+                "SELECT ifNull(toFloat64(round(avg(latency_us), 2)), 0) AS value
                      FROM dns_queries",
-                ),
-                u64_query(
-                    &self.ch,
-                    "SELECT count() AS value FROM dns_queries
+            ),
+            u64_query(
+                &self.ch,
+                "SELECT count() AS value FROM dns_queries
                      WHERE timestamp_ms > (toUnixTimestamp(now()) - 3600) * 1000",
-                ),
-                u64_query(
-                    &self.ch,
-                    "SELECT count() AS value FROM dns_queries
+            ),
+            u64_query(
+                &self.ch,
+                "SELECT count() AS value FROM dns_queries
                      WHERE timestamp_ms > (toUnixTimestamp(now()) - 86400) * 1000",
-                ),
-                multi_query::<DomainRow>(
-                    &self.ch,
-                    "SELECT domain, count() AS count FROM dns_queries
+            ),
+            multi_query::<DomainRow>(
+                &self.ch,
+                "SELECT domain, count() AS count FROM dns_queries
                      GROUP BY domain ORDER BY count DESC LIMIT 10",
-                ),
-                multi_query::<RespCodeRow>(
-                    &self.ch,
-                    "SELECT response_code, count() AS count FROM dns_queries
+            ),
+            multi_query::<RespCodeRow>(
+                &self.ch,
+                "SELECT response_code, count() AS count FROM dns_queries
                      GROUP BY response_code ORDER BY count DESC",
-                ),
-            );
+            ),
+        );
 
         ClickHouseStats {
             total_queries: total,
@@ -162,7 +157,10 @@ impl StatsClient {
             queries_last_24h: last_24h,
             top_domains: domains
                 .into_iter()
-                .map(|r| DomainCount { domain: r.domain, count: r.count })
+                .map(|r| DomainCount {
+                    domain: r.domain,
+                    count: r.count,
+                })
                 .collect(),
             response_codes: codes
                 .into_iter()
@@ -192,7 +190,7 @@ fn fetch_kafka_stats_sync(brokers: &str) -> KafkaStats {
                 partitions: 0,
                 total_messages: -1,
                 consumer_lag: -1,
-            }
+            };
         }
     };
 
@@ -204,7 +202,7 @@ fn fetch_kafka_stats_sync(brokers: &str) -> KafkaStats {
                 partitions: 0,
                 total_messages: -1,
                 consumer_lag: -1,
-            }
+            };
         }
     };
 
@@ -216,7 +214,7 @@ fn fetch_kafka_stats_sync(brokers: &str) -> KafkaStats {
                 partitions: 0,
                 total_messages: 0,
                 consumer_lag: 0,
-            }
+            };
         }
     };
 

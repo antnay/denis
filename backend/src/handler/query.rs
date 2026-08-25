@@ -1,5 +1,4 @@
 use std::{
-    string::ParseError,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -9,7 +8,8 @@ use hickory_proto::op::ResponseCode;
 
 use crate::{
     analytics::{AnalyticsProducer, DnsQueryEvent},
-    handler::{Parser, UpstreamError, UpstreamPool, UpstreamResponse},
+    config::SharedConfig,
+    handler::{ParseError, Parser, UpstreamError, UpstreamPool, UpstreamResponse},
     repo::{Cache, CacheError},
 };
 
@@ -53,11 +53,22 @@ pub struct QueryHandler {
     cache: Arc<Cache>,
     upstream: UpstreamPool,
     analytics: Arc<AnalyticsProducer>,
+    config: SharedConfig,
 }
 
 impl QueryHandler {
-    pub fn new(cache: Arc<Cache>, upstream: UpstreamPool, analytics: Arc<AnalyticsProducer>) -> Self {
-        Self { cache, upstream, analytics }
+    pub fn new(
+        cache: Arc<Cache>,
+        upstream: UpstreamPool,
+        analytics: Arc<AnalyticsProducer>,
+        config: SharedConfig,
+    ) -> Self {
+        Self {
+            cache,
+            upstream,
+            analytics,
+            config,
+        }
     }
 
     pub async fn handle(&self, data: &[u8]) -> Result<Vec<u8>, HandlerError> {
@@ -67,74 +78,81 @@ impl QueryHandler {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let query = Parser::parse_udp(data).await;
-        let delta = total.elapsed();
+        let query = Parser::parse_udp(data).await?;
         if cfg!(debug_assertions) {
-            info!("parse time: {:?}", delta);
+            info!("parse time: {:?}", total.elapsed());
         }
 
-        match self.cache.check_and_get(&query).await? {
+        let served = match self.cache.check_and_get(&query).await? {
             (true, _) => {
                 if cfg!(debug_assertions) {
                     debug!("blocked");
-                    info!("total time: {:?}", total.elapsed());
                 }
-                self.analytics.send(DnsQueryEvent {
-                    timestamp_ms,
-                    domain: query.name.clone(),
-                    query_type: query.query_type.to_string(),
-                    response_code: ResponseCode::NXDomain.to_string(),
+                let response = UpstreamResponse::blocked(&query, self.config.load().blocking_mode);
+                Served {
+                    response_code: u16::from(response.code),
+                    raw: response.raw,
                     cache_hit: false,
                     blocked: true,
                     latency_us: total.elapsed().as_micros() as u64,
-                });
-                Ok(UpstreamResponse::nxdomain(&query).raw)
+                }
             }
             (false, Some(cached)) => {
                 if cfg!(debug_assertions) {
                     debug!("cached");
-                    info!("total time: {:?}", total.elapsed());
                 }
-                self.analytics.send(DnsQueryEvent {
-                    timestamp_ms,
-                    domain: query.name.clone(),
-                    query_type: query.query_type.to_string(),
-                    response_code: ResponseCode::NoError.to_string(),
+                let latency_us = total.elapsed().as_micros() as u64;
+                self.cache.add_dns_query_moka(&query, &cached).await;
+                Served {
+                    response_code: u16::from(ResponseCode::NoError),
+                    raw: UpstreamResponse::cached(&query, cached).raw,
                     cache_hit: true,
                     blocked: false,
-                    latency_us: total.elapsed().as_micros() as u64,
-                });
-                let _ = self.cache.add_dns_query_moka(&query, &cached).await;
-                Ok(UpstreamResponse::cached(&query, cached).raw)
+                    latency_us,
+                }
             }
             (false, None) => {
-                let begin = Instant::now();
                 let res = self.upstream.resolve(&query).await?;
-                let delta = begin.elapsed();
-                if cfg!(debug_assertions) {
-                    info!("resolve time: {:?}", delta);
-                }
-
-                self.analytics.send(DnsQueryEvent {
-                    timestamp_ms,
-                    domain: query.name.clone(),
-                    query_type: query.query_type.to_string(),
-                    response_code: res.code.to_string(),
-                    cache_hit: false,
-                    blocked: false,
-                    latency_us: total.elapsed().as_micros() as u64,
-                });
+                let latency_us = total.elapsed().as_micros() as u64;
 
                 if res.code == ResponseCode::NoError {
-                    let ttl = Parser::parse_ttl(&res.raw, query.answer_offset);
-                    let _ = self.cache.add_dns_query_moka(&query, &res.raw).await;
-                    let _ = self.cache.add_dns_query_redis(&query, &res.raw, ttl).await;
+                    let ttl = self
+                        .config
+                        .load()
+                        .clamp_ttl(Parser::parse_ttl(&res.raw, query.answer_offset));
+                    self.cache.add_dns_query_moka(&query, &res.raw).await;
+                    self.cache.add_dns_query_redis(&query, &res.raw, ttl).await;
                 }
-                if cfg!(debug_assertions) {
-                    info!("total time: {:?}", total.elapsed());
+                Served {
+                    response_code: u16::from(res.code),
+                    raw: res.raw,
+                    cache_hit: false,
+                    blocked: false,
+                    latency_us,
                 }
-                Ok(res.raw)
             }
+        };
+
+        self.analytics.send(DnsQueryEvent {
+            timestamp_ms,
+            domain: query.name,
+            query_type: u16::from(query.query_type),
+            response_code: served.response_code,
+            cache_hit: served.cache_hit,
+            blocked: served.blocked,
+            latency_us: served.latency_us,
+        });
+        if cfg!(debug_assertions) {
+            info!("total time: {:?}", total.elapsed());
         }
+        Ok(served.raw)
     }
+}
+
+struct Served {
+    raw: Vec<u8>,
+    response_code: u16,
+    cache_hit: bool,
+    blocked: bool,
+    latency_us: u64,
 }

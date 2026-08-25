@@ -1,4 +1,5 @@
 use clickhouse::{Client, Row};
+use hickory_proto::{op::ResponseCode, rr::RecordType};
 use rdkafka::{
     config::ClientConfig,
     consumer::{CommitMode, Consumer, StreamConsumer},
@@ -29,8 +30,13 @@ impl From<DnsQueryEvent> for DnsQueryRow {
         Self {
             timestamp_ms: e.timestamp_ms,
             domain: e.domain,
-            query_type: e.query_type,
-            response_code: e.response_code,
+            query_type: RecordType::from(e.query_type).to_string(),
+            // EDNS. `u16::from(ResponseCode)` packs them as (high << 4) | low.
+            response_code: ResponseCode::from(
+                (e.response_code >> 4) as u8,
+                (e.response_code & 0x0F) as u8,
+            )
+            .to_string(),
             cache_hit: e.cache_hit as u8,
             blocked: e.blocked as u8,
             latency_us: e.latency_us,
@@ -44,7 +50,13 @@ pub struct AnalyticsConsumer {
 }
 
 impl AnalyticsConsumer {
-    pub fn new(brokers: &str, group_id: &str, ch_url: &str, ch_user: &str, ch_password: &str) -> Self {
+    pub fn new(
+        brokers: &str,
+        group_id: &str,
+        ch_url: &str,
+        ch_user: &str,
+        ch_password: &str,
+    ) -> Self {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
             .set("group.id", group_id)
@@ -91,7 +103,7 @@ impl AnalyticsConsumer {
         let ch = self.ch;
         let mut batch: Vec<DnsQueryRow> = Vec::with_capacity(BATCH_SIZE);
         let mut flush_interval = time::interval(Duration::from_millis(FLUSH_INTERVAL_MS));
-        flush_interval.tick().await; // skip the immediate first tick
+        flush_interval.tick().await;
 
         loop {
             tokio::select! {

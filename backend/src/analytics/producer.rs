@@ -12,8 +12,8 @@ pub const TOPIC: &str = "dns-queries";
 pub struct DnsQueryEvent {
     pub timestamp_ms: u64,
     pub domain: String,
-    pub query_type: String,
-    pub response_code: String,
+    pub query_type: u16,
+    pub response_code: u16,
     pub cache_hit: bool,
     pub blocked: bool,
     pub latency_us: u64,
@@ -50,7 +50,6 @@ impl AnalyticsProducer {
         Self { tx }
     }
 
-    // Non-blocking: drops the event if the channel is full to never stall the DNS hot path.
     pub fn send(&self, event: DnsQueryEvent) {
         let _ = self.tx.try_send(event);
     }

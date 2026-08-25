@@ -31,7 +31,7 @@ services:
       # PLAINTEXT = internal Docker networking on port 29092
       # EXTERNAL  = host access on port 9092
       - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:29092,EXTERNAL://127.0.0.1:9092
       - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       - KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9093
       - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
@@ -64,28 +64,21 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
+      - "54:53/udp"
+      - "54:53/tcp"
       - "8080:8080"
-    command:
-      - --bind
-      - 0.0.0.0:53
-      - --api-bind
-      - 0.0.0.0:8080
-      - --kafka-brokers
-      - kafka:29092
-      - --clickhouse-url
-      - http://clickhouse:8123
-      - --clickhouse-user
-      - default
-      - --clickhouse-password
-      - clickhouse
     depends_on:
       - db
       - cache
       - kafka
       - clickhouse
     environment:
+      - DENIS_DNS_BIND=0.0.0.0:53
+      - DENIS_API_BIND=0.0.0.0:8080
+      - DENIS_KAFKA_BROKERS=kafka:29092
+      - DENIS_CLICKHOUSE_URL=http://clickhouse:8123
+      - DENIS_CLICKHOUSE_USER=default
+      - DENIS_CLICKHOUSE_PASSWORD=clickhouse
       - REDIS_URL=redis://cache:6379
       - DATABASE_URL=postgres://postgres:postgres@db:5432/denis
 

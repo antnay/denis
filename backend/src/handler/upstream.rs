@@ -1,38 +1,16 @@
-use std::{net::SocketAddr, time::Duration, vec};
+use std::net::SocketAddr;
 
 use ftlog::debug;
 use hickory_proto::op::ResponseCode;
 use tokio::{
     net::UdpSocket,
-    time::{error::Elapsed, timeout},
+    time::{Duration, error::Elapsed, timeout},
 };
 
-use crate::handler::query::Query;
-
-pub enum LoadBalancer {
-    RoundRobin,
-    // WeightedRR,
-}
-
-pub struct UpstreamConfig {
-    pub servers: Vec<SocketAddr>,
-    pub timeout: tokio::time::Duration,
-    pub loadbalancer: LoadBalancer,
-}
-
-impl Default for UpstreamConfig {
-    fn default() -> Self {
-        Self {
-            servers: vec![
-                "10.0.69.1:53".parse().unwrap(),
-                "9.9.9.9:53".parse().unwrap(),
-                "1.1.1.1:53".parse().unwrap(),
-            ],
-            timeout: Duration::from_secs(5),
-            loadbalancer: LoadBalancer::RoundRobin,
-        }
-    }
-}
+use crate::{
+    config::{BlockingMode, RuntimeConfig, SharedConfig},
+    handler::query::Query,
+};
 
 #[derive(Debug, Clone)]
 pub struct UpstreamResponse {
@@ -61,6 +39,17 @@ impl UpstreamResponse {
             raw,
         }
     }
+    pub fn blocked(query: &Query, mode: BlockingMode) -> Self {
+        match mode {
+            BlockingMode::NxDomain => Self::nxdomain(query),
+            BlockingMode::Refused => Self::refused(query),
+            BlockingMode::ZeroIp => match RuntimeConfig::zero_ip(query.query_type) {
+                Some(ip) => Self::zero_ip(query, ip),
+                None => Self::nxdomain(query),
+            },
+        }
+    }
+
     pub fn nxdomain(query: &Query) -> Self {
         let response_len = query.answer_offset;
         let mut raw = query.raw[..response_len.min(query.raw.len())].to_vec();
@@ -79,6 +68,55 @@ impl UpstreamResponse {
 
         Self {
             code: ResponseCode::NXDomain,
+            raw,
+        }
+    }
+
+    fn refused(query: &Query) -> Self {
+        let response_len = query.answer_offset;
+        let mut raw = query.raw[..response_len.min(query.raw.len())].to_vec();
+
+        if raw.len() >= 12 {
+            let rd = raw[2] & 0x01;
+            raw[2] = 0x80 | rd; // QR=1, opcode 0, AA=0
+            raw[3] = 0x05; // RCODE = REFUSED
+            raw[6..12].fill(0); // AN/NS/AR counts = 0
+        }
+
+        Self {
+            code: ResponseCode::Refused,
+            raw,
+        }
+    }
+
+    fn zero_ip(query: &Query, ip: std::net::IpAddr) -> Self {
+        const TTL: u32 = 60;
+        let response_len = query.answer_offset.min(query.raw.len());
+        let mut raw = query.raw[..response_len].to_vec();
+
+        if raw.len() < 12 {
+            return Self::nxdomain(query);
+        }
+
+        let rd = raw[2] & 0x01;
+        raw[2] = 0x84 | rd; // QR=1, AA=1
+        raw[3] = 0x80; // RA=1, RCODE=0
+        raw[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
+        raw[8..12].fill(0); // NS/AR counts = 0
+
+        raw.extend_from_slice(&0xC00Cu16.to_be_bytes());
+        let (rtype, rdata): (u16, Vec<u8>) = match ip {
+            std::net::IpAddr::V4(v4) => (1, v4.octets().to_vec()), // A
+            std::net::IpAddr::V6(v6) => (28, v6.octets().to_vec()), // AAAA
+        };
+        raw.extend_from_slice(&rtype.to_be_bytes());
+        raw.extend_from_slice(&1u16.to_be_bytes()); // CLASS IN
+        raw.extend_from_slice(&TTL.to_be_bytes());
+        raw.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&rdata);
+
+        Self {
+            code: ResponseCode::NoError,
             raw,
         }
     }
@@ -104,55 +142,48 @@ impl From<Elapsed> for UpstreamError {
 }
 
 pub struct UpstreamPool {
-    config: UpstreamConfig,
+    config: SharedConfig,
 }
 
 impl UpstreamPool {
-    pub fn new(config: UpstreamConfig) -> Self {
+    pub fn new(config: SharedConfig) -> Self {
         Self { config }
     }
 
     pub async fn resolve(&self, query: &Query) -> Result<UpstreamResponse, UpstreamError> {
-        match self.config.loadbalancer {
-            LoadBalancer::RoundRobin => self.rr(query).await,
-            // LoadBalancer::WeightedRR => self.weighted_rr(query).await,
+        let cfg = self.config.load();
+        let servers = &cfg.upstreams;
+        if servers.is_empty() {
+            return Err(UpstreamError::Upstream("no upstreams configured".into()));
         }
-    }
+        let timeout = cfg.upstream_timeout();
 
-    #[inline]
-    async fn rr(&self, query: &Query) -> Result<UpstreamResponse, UpstreamError> {
         let mut err = None;
-        for attempt in 0..5 {
-            let server = &self.config.servers[attempt % self.config.servers.len()];
+        for attempt in 0..servers.len().max(1) {
+            let server = servers[attempt % servers.len()];
             if cfg!(debug_assertions) {
                 debug!("using server: {}", server);
             }
-            // println!("querying server: {}", server);
-            match self.query_dns(server, query).await {
+            match self.query_dns(&server, query, timeout).await {
                 Ok(response) => return Ok(response),
                 Err(e) => err = Some(e),
             }
         }
 
-        Err(err.unwrap_or_else(|| UpstreamError::Upstream("all upsteams failed".into())))
+        Err(err.unwrap_or_else(|| UpstreamError::Upstream("all upstreams failed".into())))
     }
-
-    // todo: weighted round robin and maybe other load balancing methods
-    // #[inline]
-    // async fn weighted_rr(&self, _query: &Query) -> Result<UpstreamResponse, UpstreamError> {
-    //     todo!("weighted round robin")
-    // }
 
     async fn query_dns(
         &self,
         server: &SocketAddr,
         query: &Query,
+        query_timeout: Duration,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.connect(server).await?;
         socket.send(&query.raw).await?;
         let mut buf = vec![0u8; 4096];
-        let len = timeout(self.config.timeout, socket.recv(&mut buf)).await??;
+        let len = timeout(query_timeout, socket.recv(&mut buf)).await??;
         let bytes = buf[..len].to_vec();
         let code = if bytes.len() >= 4 {
             match bytes[3] & 0x0F {

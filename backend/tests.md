@@ -491,7 +491,7 @@ Version 2.14.0
 Statistics:
 
   Queries sent:         173155
-  Queries completed:    173155 (100.00%)
+  Queries completed:    173,155 (100.00%)
   Queries lost:         0 (0.00%)
 
   Response codes:       NOERROR 173155 (100.00%)
@@ -558,7 +558,7 @@ Version 2.14.0
 Statistics:
 
   Queries sent:         449433
-  Queries completed:    449433 (100.00%)
+  Queries completed:    449,433 (100.00%)
   Queries lost:         0 (0.00%)
 
   Response codes:       NOERROR 449433 (100.00%)
@@ -605,3 +605,69 @@ Effective rate: 466 qps
 
 === All Tests Complete ===
 
+# 10 runtime config + subdomain matching + zero-alloc/lock-free blocklist hot path
+- Subdomain (suffix) matching with allowlist override.
+
+╔════════════════════════════════════════╗
+║     DNS Analytics Proxy Stress Test    ║
+║     Server: 127.0.0.1:5354               ║
+╚════════════════════════════════════════╝
+
+=== Throughput Test (Target: 50k qps) ===
+DNS Performance Testing Tool
+Version 2.14.0
+
+[Status] Command line: dnsperf -s 127.0.0.1 -p 5354 -d /tmp/queries.txt -l 10 -c 100 -Q 60000
+[Status] Sending queries (to 127.0.0.1:5354)
+[Status] Started at: Mon Aug 24 21:44:46 2026
+[Status] Testing complete (time limit)nds
+
+Statistics:
+
+  Queries sent:         449227
+  Queries completed:    449227 (100.00%)
+  Queries lost:         0 (0.00%)
+
+  Response codes:       NOERROR 449227 (100.00%)
+  Average packet size:  request 28, response 76
+  Run time (s):         10.001815
+  Queries per second:   44914.548010
+
+  Average Latency (s):  0.002157 (min 0.000188, max 0.044773)
+  Latency StdDev (s):   0.000729
+
+
+=== Latency Test (Target: <1ms p99) ===
+1000 queries completed
+  Avg: 0.00ms
+  P50: 0ms
+  P95: 0ms
+  P99: 0ms
+✓ Sub-millisecond p99 achieved
+
+=== Cache Hit Rate Test (Target: 85%) ===
+1000 queries, 1000 cache hits
+Cache hit rate: 100.00%
+✓ 85% cache hit rate achieved
+
+=== Blocklist Test ===
+Testing blocked domains:
+  ✗ ads.google.com → NOERROR (expected NXDOMAIN)
+  ✗ doubleclick.net → NOERROR (expected NXDOMAIN)
+  ✓ tracking.facebook.com → NXDOMAIN
+  ✗ analytics.google.com → NOERROR (expected NXDOMAIN)
+  ✗ ad.doubleclick.net → NOERROR (expected NXDOMAIN)
+Testing allowed domains:
+  ✓ google.com → NOERROR
+  ✓ facebook.com → NOERROR
+  ✓ github.com → NOERROR
+
+Blocked: 1/5
+Allowed: 3/3
+
+=== Concurrency Test ===
+Spawning 500 concurrent queries...
+Completed 500 concurrent queries in 1.190824000s
+Effective rate: 419 qps
+
+=== All Tests Complete ===
