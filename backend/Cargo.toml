@@ -26,6 +26,7 @@ ahash = "0.8"
 memchr = "2.7"
 crossbeam-queue = "0.3"
 socket2 = { version = "0.5", features = ["all"] }
+core_affinity = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 redis = { version = "1.0.2", features = [
   "tokio-comp",

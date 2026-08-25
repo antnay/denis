@@ -25,8 +25,7 @@ use crate::{
 #[cfg(feature = "analytics")]
 use crate::analytics::{AnalyticsConsumer, StatsClient};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     let level = match cli.verbose {
@@ -39,6 +38,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init()
         .expect("failed to init logger");
 
+    let cores = core_affinity::get_core_ids();
+    let total = cores
+        .as_ref()
+        .map(|c| c.len())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let tokio_workers = cli.dns.tokio_workers.max(1);
+    let datapath_workers = cli
+        .dns
+        .workers
+        .unwrap_or_else(|| total.saturating_sub(tokio_workers).max(1))
+        .max(1);
+
+    let pin_at = |i: usize| cores.as_ref().map(|c| c[i % c.len()]);
+    let dp_pins: Vec<Option<core_affinity::CoreId>> = (0..datapath_workers).map(pin_at).collect();
+
+    let rt = match cli.dns.runtime {
+        Runtime::Monoio => {
+            let tk_pins: Vec<Option<core_affinity::CoreId>> =
+                (0..tokio_workers).map(|i| pin_at(datapath_workers + i)).collect();
+            let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(tokio_workers)
+                .enable_all()
+                .on_thread_start(move || {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(core) = tk_pins.get(i % tk_pins.len()).copied().flatten() {
+                        core_affinity::set_for_current(core);
+                    }
+                })
+                .build()?
+        }
+        Runtime::Tokio => tokio::runtime::Builder::new_multi_thread().enable_all().build()?,
+    };
+
+    rt.block_on(run(cli, dp_pins))
+}
+
+async fn run(
+    cli: Cli,
+    dp_pins: Vec<Option<core_affinity::CoreId>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let rds_conn = Client::open(cli.redis.redis_url.clone())
         .expect("Cannot connect to redis")
         .get_multiplexed_async_connection()
@@ -158,9 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Runtime::Monoio => {
-            let workers = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
+            let workers = dp_pins.len();
 
             let (cold_tx, cold_rx) = flume::unbounded::<dns::mono::ColdRequest>();
             for _ in 0..workers {
@@ -169,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             dns::mono::spawn_workers(
                 cli.dns.dns_bind,
-                workers,
+                dp_pins,
                 cache.clone(),
                 runtime_config.clone(),
                 analytics_producer.clone(),
@@ -185,8 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             info!(
-                "Starting DNS server on {} with {} workers",
-                cli.dns.dns_bind, workers
+                "Starting DNS server on {} with {} pinned workers + {} tokio",
+                cli.dns.dns_bind, workers, cli.dns.tokio_workers
             );
             std::future::pending::<()>().await;
         }

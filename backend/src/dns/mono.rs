@@ -35,13 +35,13 @@ struct Worker {
 
 pub fn spawn_workers(
     addr: SocketAddr,
-    workers: usize,
+    pins: Vec<Option<core_affinity::CoreId>>,
     cache: Arc<Cache>,
     config: SharedConfig,
     analytics: Arc<AnalyticsProducer>,
     cold: flume::Sender<ColdRequest>,
 ) {
-    for id in 0..workers {
+    for (id, pin) in pins.into_iter().enumerate() {
         let worker = Worker {
             cache: cache.clone(),
             config: config.clone(),
@@ -51,6 +51,9 @@ pub fn spawn_workers(
         std::thread::Builder::new()
             .name(format!("monoio-{id}"))
             .spawn(move || {
+                if let Some(core) = pin {
+                    core_affinity::set_for_current(core);
+                }
                 let std_sock = match bind_reuseport(addr) {
                     Ok(s) => s,
                     Err(e) => {
@@ -99,24 +102,45 @@ impl Worker {
             };
             buf.truncate(len);
 
-            let this = this.clone();
-            let socket = socket.clone();
-            monoio::spawn(async move {
-                if let Some(resp) = this.serve(buf).await {
+            // Hot path (blocked / L1 hit) runs inline on this core — no task
+            // spawn, run-to-completion. Only a cache miss, which must await the
+            // tokio cold path, is spawned so it doesn't stall recv.
+            match this.classify(buf).await {
+                Outcome::Reply(resp) => {
                     let (r, _) = socket.send_to(resp, src).await;
                     if let Err(e) = r {
                         error!("monoio send: {e}");
                     }
                 }
-            });
+                Outcome::Miss {
+                    query,
+                    total,
+                    timestamp_ms,
+                } => {
+                    let this = this.clone();
+                    let socket = socket.clone();
+                    monoio::spawn(async move {
+                        if let Some(resp) = this.serve_miss(query, total, timestamp_ms).await {
+                            let (r, _) = socket.send_to(resp, src).await;
+                            if let Err(e) = r {
+                                error!("monoio send: {e}");
+                            }
+                        }
+                    });
+                }
+                Outcome::Drop => {}
+            }
         }
     }
 
-    async fn serve(&self, packet: Vec<u8>) -> Option<Vec<u8>> {
+    async fn classify(&self, packet: Vec<u8>) -> Outcome {
         let total = Instant::now();
         let timestamp_ms = now_ms();
 
-        let query = Parser::parse_udp(packet).await.ok()?;
+        let query = match Parser::parse_udp(packet).await {
+            Ok(q) => q,
+            Err(_) => return Outcome::Drop,
+        };
 
         if self.cache.is_blocked(&query.name) {
             let resp = UpstreamResponse::blocked(&query, self.config.load().blocking_mode);
@@ -129,7 +153,7 @@ impl Worker {
                 blocked: true,
                 latency_us: total.elapsed().as_micros() as u64,
             });
-            return Some(resp.raw);
+            return Outcome::Reply(resp.raw);
         }
 
         if let Some(cached) = self.cache.l1_get(&query).await {
@@ -143,11 +167,17 @@ impl Worker {
                 blocked: false,
                 latency_us: total.elapsed().as_micros() as u64,
             });
-            return Some(resp.raw);
+            return Outcome::Reply(resp.raw);
         }
 
-        // Cache miss: hand the parsed query to the tokio cold path (Redis L2 +
-        // upstream + cache writes + miss analytics all happen there).
+        Outcome::Miss {
+            query,
+            total,
+            timestamp_ms,
+        }
+    }
+
+    async fn serve_miss(&self, query: Query, total: Instant, timestamp_ms: u64) -> Option<Vec<u8>> {
         let (tx, rx) = flume::bounded(1);
         self.cold
             .send_async(ColdRequest {
@@ -162,8 +192,16 @@ impl Worker {
     }
 }
 
-/// Drains cache misses on the tokio runtime, running the handler over the
-/// already-parsed query (which owns Redis + upstream). One per worker; flume is mpmc.
+enum Outcome {
+    Reply(Vec<u8>),
+    Miss {
+        query: Query,
+        total: Instant,
+        timestamp_ms: u64,
+    },
+    Drop,
+}
+
 pub async fn cold_path(rx: flume::Receiver<ColdRequest>, handler: Arc<crate::handler::QueryHandler>) {
     while let Ok(req) = rx.recv_async().await {
         let handler = handler.clone();

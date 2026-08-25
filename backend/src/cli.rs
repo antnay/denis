@@ -72,6 +72,14 @@ pub struct DnsArgs {
     /// Datapath runtime: monoio (thread-per-core, io_uring) or tokio.
     #[arg(long, env = "DENIS_RUNTIME", value_enum, default_value_t = Runtime::Monoio)]
     pub runtime: Runtime,
+
+    /// Number of pinned monoio datapath workers (default: cores - tokio-workers).
+    #[arg(long, env = "DENIS_WORKERS")]
+    pub workers: Option<usize>,
+
+    /// Tokio control-plane worker threads (API, cold path, analytics).
+    #[arg(long, env = "DENIS_TOKIO_WORKERS", default_value_t = 2)]
+    pub tokio_workers: usize,
 }
 
 #[derive(Args, Debug)]
