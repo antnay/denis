@@ -39,7 +39,7 @@ impl UpstreamResponse {
         }
 
         Self {
-            code: ResponseCode::NoError,
+            code: rcode_from_raw(&raw),
             raw,
         }
     }
@@ -225,18 +225,21 @@ impl UpstreamPool {
         .await??;
 
         let bytes = buf[..len].to_vec();
-        let code = if len >= 4 {
-            match buf[3] & 0x0F {
-                0 => ResponseCode::NoError,
-                2 => ResponseCode::ServFail,
-                3 => ResponseCode::NXDomain,
-                5 => ResponseCode::Refused,
-                n => ResponseCode::Unknown(n.into()),
-            }
-        } else {
-            ResponseCode::ServFail
-        };
-
+        let code = rcode_from_raw(&bytes);
         Ok(UpstreamResponse { code, raw: bytes })
+    }
+}
+
+/// Map a DNS message's RCODE (low nibble of byte 3) to a `ResponseCode`.
+pub fn rcode_from_raw(raw: &[u8]) -> ResponseCode {
+    match raw.get(3) {
+        Some(b) => match b & 0x0F {
+            0 => ResponseCode::NoError,
+            2 => ResponseCode::ServFail,
+            3 => ResponseCode::NXDomain,
+            5 => ResponseCode::Refused,
+            n => ResponseCode::Unknown(n.into()),
+        },
+        None => ResponseCode::ServFail,
     }
 }

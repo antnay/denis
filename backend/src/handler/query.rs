@@ -4,11 +4,10 @@ use std::{
 };
 
 use ftlog::{debug, info};
-use hickory_proto::op::ResponseCode;
 
 use crate::{
     analytics::{AnalyticsProducer, DnsQueryEvent},
-    config::SharedConfig,
+    config::{RuntimeConfig, SharedConfig},
     handler::{ParseError, Parser, UpstreamError, UpstreamPool, UpstreamResponse},
     repo::{Cache, CacheError},
 };
@@ -111,14 +110,13 @@ impl QueryHandler {
                     debug!("cached");
                 }
                 let latency_us = total.elapsed().as_micros() as u64;
-                let ttl = self
-                    .config
-                    .load()
-                    .clamp_ttl(Parser::parse_ttl(&cached, query.answer_offset));
-                self.cache.add_dns_query_moka(&query, &cached, ttl).await;
+                if let Some(ttl) = cache_ttl(&self.config.load(), &cached, query.answer_offset) {
+                    self.cache.add_dns_query_moka(&query, &cached, ttl).await;
+                }
+                let response = UpstreamResponse::cached(&query, cached);
                 Served {
-                    response_code: u16::from(ResponseCode::NoError),
-                    raw: UpstreamResponse::cached(&query, cached).raw,
+                    response_code: u16::from(response.code),
+                    raw: response.raw,
                     cache_hit: true,
                     blocked: false,
                     latency_us,
@@ -128,11 +126,7 @@ impl QueryHandler {
                 let res = self.upstream.resolve(&query).await?;
                 let latency_us = total.elapsed().as_micros() as u64;
 
-                if res.code == ResponseCode::NoError {
-                    let ttl = self
-                        .config
-                        .load()
-                        .clamp_ttl(Parser::parse_ttl(&res.raw, query.answer_offset));
+                if let Some(ttl) = cache_ttl(&self.config.load(), &res.raw, query.answer_offset) {
                     self.cache.add_dns_query_moka(&query, &res.raw, ttl).await;
                     self.cache.add_dns_query_redis(&query, &res.raw, ttl).await;
                 }
@@ -168,4 +162,22 @@ struct Served {
     cache_hit: bool,
     blocked: bool,
     latency_us: u64,
+}
+
+/// TTL to cache a response under, or `None` to not cache it.
+/// Positive answers (NOERROR + answers) use the record TTL; negatives
+/// (NXDOMAIN, or NODATA = NOERROR with no answers) use the negative-TTL cap;
+/// SERVFAIL/REFUSED are not cached.
+fn cache_ttl(config: &RuntimeConfig, raw: &[u8], answer_offset: usize) -> Option<u32> {
+    let rcode = raw.get(3).map(|b| b & 0x0F)?;
+    let ancount = if raw.len() >= 8 {
+        u16::from_be_bytes([raw[6], raw[7]])
+    } else {
+        0
+    };
+    match rcode {
+        0 if ancount > 0 => Some(config.clamp_ttl(Parser::parse_ttl(raw, answer_offset))),
+        0 | 3 => Some(config.clamp_ttl(config.neg_ttl)),
+        _ => None,
+    }
 }

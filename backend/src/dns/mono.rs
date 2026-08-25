@@ -6,7 +6,6 @@ use std::{
 };
 
 use ftlog::error;
-use hickory_proto::op::ResponseCode;
 use monoio::net::udp::UdpSocket;
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -162,7 +161,7 @@ impl Worker {
                 timestamp_ms,
                 domain: query.name,
                 query_type: u16::from(query.query_type),
-                response_code: u16::from(ResponseCode::NoError),
+                response_code: u16::from(resp.code),
                 cache_hit: true,
                 blocked: false,
                 latency_us: total.elapsed().as_micros() as u64,

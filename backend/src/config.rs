@@ -25,6 +25,10 @@ impl Default for BlockingMode {
     }
 }
 
+fn default_neg_ttl() -> u32 {
+    60
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     pub upstreams: Vec<SocketAddr>,
@@ -32,6 +36,10 @@ pub struct RuntimeConfig {
     pub blocking_mode: BlockingMode,
     pub cache_min_ttl: u32,
     pub cache_max_ttl: u32,
+    /// TTL cap for cached negative answers (NXDOMAIN / NODATA). serde default
+    /// keeps configs persisted before this field existed loadable.
+    #[serde(default = "default_neg_ttl")]
+    pub neg_ttl: u32,
 }
 
 impl RuntimeConfig {
@@ -42,6 +50,7 @@ impl RuntimeConfig {
             blocking_mode: BlockingMode::default(),
             cache_min_ttl: 0,
             cache_max_ttl: 86_400,
+            neg_ttl: default_neg_ttl(),
         }
     }
 
@@ -73,6 +82,7 @@ pub struct RuntimeConfigPatch {
     pub blocking_mode: Option<BlockingMode>,
     pub cache_min_ttl: Option<u32>,
     pub cache_max_ttl: Option<u32>,
+    pub neg_ttl: Option<u32>,
 }
 
 impl RuntimeConfigPatch {
@@ -83,6 +93,7 @@ impl RuntimeConfigPatch {
             blocking_mode: self.blocking_mode.unwrap_or(base.blocking_mode),
             cache_min_ttl: self.cache_min_ttl.unwrap_or(base.cache_min_ttl),
             cache_max_ttl: self.cache_max_ttl.unwrap_or(base.cache_max_ttl),
+            neg_ttl: self.neg_ttl.unwrap_or(base.neg_ttl),
         }
     }
 }
