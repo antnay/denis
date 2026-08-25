@@ -33,10 +33,42 @@ pub struct Cli {
     pub clickhouse: ClickhouseArgs,
     #[command(flatten)]
     pub analytics: AnalyticsArgs,
+    #[command(flatten)]
+    pub auth: AuthArgs,
 
     /// Increase log verbosity: -v = debug, -vv = trace.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Management API auth")]
+pub struct AuthArgs {
+    /// Admin username for POST /auth/login. Auth is enforced once this and
+    /// --admin-password (or --api-token) are set; otherwise the API is open.
+    #[arg(long, env = "DENIS_ADMIN_USER")]
+    pub admin_user: Option<String>,
+
+    /// Plaintext admin password; argon2-hashed at startup.
+    #[arg(long, env = "DENIS_ADMIN_PASSWORD")]
+    pub admin_password: Option<String>,
+
+    /// Pre-computed argon2 PHC hash (preferred over --admin-password). Generate
+    /// one with `denis --hash-password <PW>`.
+    #[arg(long, env = "DENIS_ADMIN_PASSWORD_HASH")]
+    pub admin_password_hash: Option<String>,
+
+    /// Static long-lived bearer token (alternative to login).
+    #[arg(long, env = "DENIS_API_TOKEN")]
+    pub api_token: Option<String>,
+
+    /// Lifetime of a login-issued session token, in seconds.
+    #[arg(long, env = "DENIS_AUTH_TTL_SECS", default_value_t = 86_400)]
+    pub auth_ttl_secs: u64,
+
+    /// Print an argon2 hash of the given password and exit.
+    #[arg(long)]
+    pub hash_password: Option<String>,
 }
 
 #[derive(Args, Debug)]

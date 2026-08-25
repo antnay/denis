@@ -28,6 +28,11 @@ use crate::analytics::{AnalyticsConsumer, StatsClient};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    if let Some(pw) = cli.auth.hash_password.as_deref() {
+        println!("{}", api::Auth::hash_password(pw));
+        return Ok(());
+    }
+
     let level = match cli.verbose {
         0 => LevelFilter::Info,
         1 => LevelFilter::Debug,
@@ -39,10 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("failed to init logger");
 
     let cores = core_affinity::get_core_ids();
-    let total = cores
-        .as_ref()
-        .map(|c| c.len())
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let total = cores.as_ref().map(|c| c.len()).unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
     let tokio_workers = cli.dns.tokio_workers.max(1);
     let datapath_workers = cli
         .dns
@@ -55,8 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rt = match cli.dns.runtime {
         Runtime::Monoio => {
-            let tk_pins: Vec<Option<core_affinity::CoreId>> =
-                (0..tokio_workers).map(|i| pin_at(datapath_workers + i)).collect();
+            let tk_pins: Vec<Option<core_affinity::CoreId>> = (0..tokio_workers)
+                .map(|i| pin_at(datapath_workers + i))
+                .collect();
             let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(tokio_workers)
@@ -69,7 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .build()?
         }
-        Runtime::Tokio => tokio::runtime::Builder::new_multi_thread().enable_all().build()?,
+        Runtime::Tokio => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?,
     };
 
     rt.block_on(run(cli, dp_pins))
@@ -165,12 +174,28 @@ async fn run(
             &cli.clickhouse.clickhouse_password,
         ))
     });
+    let bootstrap_hash = cli.auth.admin_password_hash.clone().or_else(|| {
+        cli.auth
+            .admin_password
+            .as_deref()
+            .map(api::Auth::hash_password)
+    });
+    let auth = api::Auth::new(
+        cache.pool().clone(),
+        cli.auth.api_token.clone(),
+        std::time::Duration::from_secs(cli.auth.auth_ttl_secs),
+        cli.auth.admin_user.clone(),
+        bootstrap_hash,
+    )
+    .await
+    .expect("failed to init auth");
     let api_router = api::router(ApiState {
         cache: cache.clone(),
         #[cfg(feature = "analytics")]
         stats: stats_client,
         metrics: metrics.clone(),
         config: runtime_config.clone(),
+        auth,
     });
     let api_bind = cli.api.api_bind;
     tokio::spawn(async move {
