@@ -36,8 +36,6 @@ pub struct RuntimeConfig {
     pub blocking_mode: BlockingMode,
     pub cache_min_ttl: u32,
     pub cache_max_ttl: u32,
-    /// TTL cap for cached negative answers (NXDOMAIN / NODATA). serde default
-    /// keeps configs persisted before this field existed loadable.
     #[serde(default = "default_neg_ttl")]
     pub neg_ttl: u32,
 }

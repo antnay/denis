@@ -8,12 +8,6 @@ pub enum Runtime {
     Tokio,
 }
 
-/// Denis DNS proxy.
-///
-/// Flags below are *startup* configuration: things that require a restart to
-/// change (bind addresses, backend connections, socket tuning). Runtime-tunable
-/// settings (upstreams, blocking mode, cache TTL clamps) live in [`RuntimeConfig`]
-/// and are mutated through the management API — see `crate::config`.
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 pub struct Cli {
@@ -49,8 +43,8 @@ pub struct AuthArgs {
     #[arg(long, env = "DENIS_ADMIN_USER")]
     pub admin_user: Option<String>,
 
-    /// Plaintext admin password; argon2-hashed at startup.
-    #[arg(long, env = "DENIS_ADMIN_PASSWORD")]
+    /// Plaintext admin password
+    /// #[arg(long, env = "DENIS_ADMIN_PASSWORD")]
     pub admin_password: Option<String>,
 
     /// Pre-computed argon2 PHC hash (preferred over --admin-password). Generate
@@ -101,17 +95,17 @@ pub struct DnsArgs {
     #[arg(long, env = "DENIS_DNS_BIND", default_value = "0.0.0.0:53")]
     pub dns_bind: SocketAddr,
 
-    /// Datapath runtime: monoio (thread-per-core, io_uring) or tokio.
+    /// Datapath runtime: [monoio, tokio]
     #[arg(long, env = "DENIS_RUNTIME", value_enum, default_value_t = Runtime::Monoio)]
     pub runtime: Runtime,
 
-    /// Number of pinned monoio datapath workers (default: cores - tokio-workers).
-    #[arg(long, env = "DENIS_WORKERS")]
-    pub workers: Option<usize>,
+    /// Number dns workers (default: cores - other-workers).
+    #[arg(long, env = "DNS_WORKERS")]
+    pub dns_workers: Option<usize>,
 
-    /// Tokio control-plane worker threads (API, cold path, analytics).
-    #[arg(long, env = "DENIS_TOKIO_WORKERS", default_value_t = 2)]
-    pub tokio_workers: usize,
+    /// API and analytics workers
+    #[arg(long, env = "OTHER_WORKERS", default_value_t = 2)]
+    pub other_workers: usize,
 }
 
 #[derive(Args, Debug)]

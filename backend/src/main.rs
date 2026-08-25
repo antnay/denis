@@ -49,10 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|n| n.get())
             .unwrap_or(1)
     });
-    let tokio_workers = cli.dns.tokio_workers.max(1);
+    let tokio_workers = cli.dns.other_workers.max(1);
     let datapath_workers = cli
         .dns
-        .workers
+        .dns_workers
         .unwrap_or_else(|| total.saturating_sub(tokio_workers).max(1))
         .max(1);
 
@@ -249,7 +249,7 @@ async fn run(
 
             info!(
                 "Starting DNS server on {} with {} pinned workers + {} tokio",
-                cli.dns.dns_bind, workers, cli.dns.tokio_workers
+                cli.dns.dns_bind, workers, cli.dns.other_workers
             );
             std::future::pending::<()>().await;
         }
