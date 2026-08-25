@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get, patch, post},
 };
@@ -68,6 +68,30 @@ struct BulkResult {
     added: usize,
     skipped: usize,
     errors: Vec<String>,
+}
+
+const DEFAULT_LIMIT: usize = 100;
+const MAX_LIMIT: usize = 1000;
+
+#[derive(Deserialize)]
+struct Pagination {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl Pagination {
+    fn resolve(&self) -> (usize, usize) {
+        let limit = self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        (limit, self.offset.unwrap_or(0))
+    }
+}
+
+#[derive(Serialize)]
+struct Page<T> {
+    items: Vec<T>,
+    total: i64,
+    limit: usize,
+    offset: usize,
 }
 
 /// Uniform envelope for every JSON response (success and error).
@@ -233,9 +257,18 @@ async fn health(State(s): State<ApiState>) -> Json<ApiResponse<HealthData>> {
 
 // ── Blocklist ─────────────────────────────────────────────────────────────
 
-async fn list_blocked(State(s): State<ApiState>) -> ApiResult<Vec<String>> {
-    let domains = s.cache.list_block_domains().await.map_err(ApiError::internal)?;
-    Ok(ApiResponse::ok(domains))
+async fn list_blocked(
+    State(s): State<ApiState>,
+    Query(p): Query<Pagination>,
+) -> ApiResult<Page<String>> {
+    let (limit, offset) = p.resolve();
+    let items = s
+        .cache
+        .list_block_domains(limit as i64, offset as i64)
+        .await
+        .map_err(ApiError::internal)?;
+    let total = s.cache.count_block_domains().await.map_err(ApiError::internal)?;
+    Ok(ApiResponse::ok(Page { items, total, limit, offset }))
 }
 
 async fn block_add_one(
@@ -290,9 +323,18 @@ async fn block_add_url(
 
 // ── Allowlist ─────────────────────────────────────────────────────────────
 
-async fn list_allowed(State(s): State<ApiState>) -> ApiResult<Vec<String>> {
-    let domains = s.cache.list_allow_domains().await.map_err(ApiError::internal)?;
-    Ok(ApiResponse::ok(domains))
+async fn list_allowed(
+    State(s): State<ApiState>,
+    Query(p): Query<Pagination>,
+) -> ApiResult<Page<String>> {
+    let (limit, offset) = p.resolve();
+    let items = s
+        .cache
+        .list_allow_domains(limit as i64, offset as i64)
+        .await
+        .map_err(ApiError::internal)?;
+    let total = s.cache.count_allow_domains().await.map_err(ApiError::internal)?;
+    Ok(ApiResponse::ok(Page { items, total, limit, offset }))
 }
 
 async fn allow_add_one(
