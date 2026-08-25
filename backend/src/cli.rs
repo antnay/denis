@@ -1,6 +1,12 @@
 use std::net::SocketAddr;
 
-use clap::{Args, Parser};
+use clap::{Args, Parser, ValueEnum};
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Runtime {
+    Monoio,
+    Tokio,
+}
 
 /// Denis DNS proxy.
 ///
@@ -25,10 +31,35 @@ pub struct Cli {
     pub kafka: KafkaArgs,
     #[command(flatten)]
     pub clickhouse: ClickhouseArgs,
+    #[command(flatten)]
+    pub analytics: AnalyticsArgs,
 
     /// Increase log verbosity: -v = debug, -vv = trace.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Analytics")]
+pub struct AnalyticsArgs {
+    /// ClickHouse analytics sink (Kafka producer + consumer + /stats).
+    /// Only effective if built with the `analytics` feature.
+    #[arg(
+        long = "clickhouse",
+        env = "DENIS_CLICKHOUSE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub clickhouse: bool,
+
+    /// Prometheus metrics sink (/metrics endpoint for Grafana).
+    #[arg(
+        long = "prometheus",
+        env = "DENIS_PROMETHEUS",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub prometheus: bool,
 }
 
 #[derive(Args, Debug)]
@@ -37,6 +68,10 @@ pub struct DnsArgs {
     /// Address the UDP + TCP DNS listener binds to.
     #[arg(long, env = "DENIS_DNS_BIND", default_value = "0.0.0.0:53")]
     pub dns_bind: SocketAddr,
+
+    /// Datapath runtime: monoio (thread-per-core, io_uring) or tokio.
+    #[arg(long, env = "DENIS_RUNTIME", value_enum, default_value_t = Runtime::Monoio)]
+    pub runtime: Runtime,
 }
 
 #[derive(Args, Debug)]

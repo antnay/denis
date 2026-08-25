@@ -8,15 +8,20 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
-    analytics::StatsClient,
+    analytics::Metrics,
     config::{RuntimeConfig, RuntimeConfigPatch, SharedConfig},
     repo::{AddOutcome, Cache, parse_domain_list},
 };
 
+#[cfg(feature = "analytics")]
+use crate::analytics::StatsClient;
+
 #[derive(Clone)]
 pub struct ApiState {
     pub cache: Arc<Cache>,
-    pub stats: Arc<StatsClient>,
+    #[cfg(feature = "analytics")]
+    pub stats: Option<Arc<StatsClient>>,
+    pub metrics: Option<Arc<Metrics>>,
     pub config: SharedConfig,
 }
 
@@ -86,9 +91,10 @@ fn bad_request(e: impl std::fmt::Display) -> (StatusCode, Json<ErrResp>) {
 }
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    #[allow(unused_mut)]
+    let mut router = Router::new()
         .route("/health", get(health))
-        .route("/stats", get(stats))
+        .route("/metrics", get(metrics))
         .route("/blocklist", get(list_blocked))
         .route("/blocklist", post(block_add_one))
         .route("/blocklist/bulk", post(block_add_bulk))
@@ -99,8 +105,31 @@ pub fn router(state: ApiState) -> Router {
         .route("/allowlist", post(allow_add_one))
         .route("/allowlist/bulk", post(allow_add_bulk))
         .route("/config", get(get_config))
-        .route("/config", patch(patch_config))
-        .with_state(state)
+        .route("/config", patch(patch_config));
+
+    #[cfg(feature = "analytics")]
+    {
+        router = router.route("/stats", get(stats));
+    }
+
+    router.with_state(state)
+}
+
+/// Prometheus scrape endpoint. Sink gauges are sampled here at scrape time.
+async fn metrics(State(s): State<ApiState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match &s.metrics {
+        Some(m) => {
+            let stats = s.cache.stats().await;
+            let body = m.render(
+                stats.block_list_size,
+                stats.allow_list_size,
+                stats.l1_entry_count,
+            );
+            ([("content-type", "text/plain; version=0.0.4")], body).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE, "prometheus disabled").into_response(),
+    }
 }
 
 async fn get_config(State(s): State<ApiState>) -> Json<RuntimeConfig> {
@@ -121,8 +150,17 @@ async fn patch_config(
     Ok(Json(merged))
 }
 
-async fn stats(State(s): State<ApiState>) -> Json<crate::analytics::AllStats> {
-    Json(s.stats.get_stats().await)
+#[cfg(feature = "analytics")]
+async fn stats(State(s): State<ApiState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match &s.stats {
+        Some(client) => Json(client.get_stats().await).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "analytics": "disabled" })),
+        )
+            .into_response(),
+    }
 }
 
 async fn health(State(s): State<ApiState>) -> Json<serde_json::Value> {

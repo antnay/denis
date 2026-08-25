@@ -77,7 +77,7 @@ impl AnalyticsConsumer {
         Self { consumer, ch }
     }
 
-    async fn ensure_table(&self) {
+    async fn ensure_table(&self) -> Result<(), clickhouse::error::Error> {
         self.ch
             .query(
                 "CREATE TABLE IF NOT EXISTS dns_queries (
@@ -93,11 +93,15 @@ impl AnalyticsConsumer {
             )
             .execute()
             .await
-            .expect("Failed to create dns_queries table in ClickHouse");
     }
 
     pub async fn run(self) {
-        self.ensure_table().await;
+        let mut backoff = Duration::from_secs(1);
+        while let Err(e) = self.ensure_table().await {
+            ftlog::error!("ClickHouse ensure_table failed (retry in {backoff:?}): {e}");
+            time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(30));
+        }
 
         let consumer = self.consumer;
         let ch = self.ch;

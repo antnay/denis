@@ -1,7 +1,15 @@
-mod consumer;
+pub mod metrics;
 mod producer;
+
+#[cfg(feature = "analytics")]
+mod consumer;
+#[cfg(feature = "analytics")]
 mod stats;
 
-pub use consumer::AnalyticsConsumer;
+pub use metrics::Metrics;
 pub use producer::{AnalyticsProducer, DnsQueryEvent};
-pub use stats::{AllStats, StatsClient};
+
+#[cfg(feature = "analytics")]
+pub use consumer::AnalyticsConsumer;
+#[cfg(feature = "analytics")]
+pub use stats::StatsClient;

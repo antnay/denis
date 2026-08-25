@@ -13,14 +13,17 @@ use sqlx::postgres;
 use std::sync::Arc;
 
 use crate::{
-    analytics::{AnalyticsConsumer, AnalyticsProducer, StatsClient},
+    analytics::{AnalyticsProducer, Metrics},
     api::ApiState,
-    cli::Cli,
+    cli::{Cli, Runtime},
     config::RuntimeConfig,
     dns::Server,
     handler::{QueryHandler, UpstreamPool},
     repo::Cache,
 };
+
+#[cfg(feature = "analytics")]
+use crate::analytics::{AnalyticsConsumer, StatsClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,15 +79,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("failed to load runtime config");
 
-    let analytics_producer = Arc::new(AnalyticsProducer::new(&cli.kafka.kafka_brokers));
-    let analytics_consumer = AnalyticsConsumer::new(
-        &cli.kafka.kafka_brokers,
-        "denis-analytics",
-        &cli.clickhouse.clickhouse_url,
-        &cli.clickhouse.clickhouse_user,
-        &cli.clickhouse.clickhouse_password,
+    let metrics = cli.analytics.prometheus.then(Metrics::new);
+    let clickhouse_on = cli.analytics.clickhouse && cfg!(feature = "analytics");
+    if cli.analytics.clickhouse && !cfg!(feature = "analytics") {
+        info!("--clickhouse requested but built without the `analytics` feature; ignoring");
+    }
+    info!(
+        "sinks: prometheus={} clickhouse={}",
+        cli.analytics.prometheus, clickhouse_on
     );
-    tokio::spawn(analytics_consumer.run());
+
+    let kafka_brokers = clickhouse_on.then(|| cli.kafka.kafka_brokers.clone());
+    let analytics_producer = Arc::new(AnalyticsProducer::spawn(metrics.clone(), kafka_brokers));
+
+    #[cfg(feature = "analytics")]
+    if clickhouse_on {
+        let analytics_consumer = AnalyticsConsumer::new(
+            &cli.kafka.kafka_brokers,
+            "denis-analytics",
+            &cli.clickhouse.clickhouse_url,
+            &cli.clickhouse.clickhouse_user,
+            &cli.clickhouse.clickhouse_password,
+        );
+        tokio::spawn(analytics_consumer.run());
+    }
 
     let cache = Arc::new(Cache::new(rds_conn, pg_pool, cli.redis.cache_capacity));
     cache.read_blocklist_db_memory().await;
@@ -94,19 +112,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Arc::new(QueryHandler::new(
         cache.clone(),
         upstream,
-        analytics_producer,
+        analytics_producer.clone(),
         runtime_config.clone(),
     ));
 
-    let stats_client = Arc::new(StatsClient::new(
-        &cli.kafka.kafka_brokers,
-        &cli.clickhouse.clickhouse_url,
-        &cli.clickhouse.clickhouse_user,
-        &cli.clickhouse.clickhouse_password,
-    ));
+    #[cfg(feature = "analytics")]
+    let stats_client = clickhouse_on.then(|| {
+        Arc::new(StatsClient::new(
+            &cli.kafka.kafka_brokers,
+            &cli.clickhouse.clickhouse_url,
+            &cli.clickhouse.clickhouse_user,
+            &cli.clickhouse.clickhouse_password,
+        ))
+    });
     let api_router = api::router(ApiState {
         cache: cache.clone(),
+        #[cfg(feature = "analytics")]
         stats: stats_client,
+        metrics: metrics.clone(),
         config: runtime_config.clone(),
     });
     let api_bind = cli.api.api_bind;
