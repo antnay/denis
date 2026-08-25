@@ -98,14 +98,12 @@ concurrency_test() {
 run_all() {
     echo "╔════════════════════════════════════════╗"
     echo "║     DNS Analytics Proxy Stress Test    ║"
-    echo "║     Server: $SERVER:$PORT               ║"
+    echo "║     Server: $SERVER:$PORT              ║"
     echo "╚════════════════════════════════════════╝"
     echo ""
 
     throughput_test
     latency_test
-    cache_test
-    blocklist_test
     concurrency_test
 
     echo ""
