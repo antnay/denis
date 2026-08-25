@@ -120,16 +120,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("API server error");
     });
 
-    let server_config = dns::ServerConfig {
-        bind_addr: cli.dns.dns_bind,
-        udp_buffer_size: dns::UDP_BUFFER_SIZE,
-        udp_buffer_count: dns::UDP_BUFFER_COUNT,
-    };
-    let dns_server = Server::new(server_config, handler);
-    info!("Starting DNS server on {}", cli.dns.dns_bind);
-    if let Err(e) = dns_server.run().await {
-        error!("Server error: {}", e);
-        std::process::exit(1);
+    match cli.dns.runtime {
+        Runtime::Tokio => {
+            let server_config = dns::ServerConfig {
+                bind_addr: cli.dns.dns_bind,
+                udp_buffer_size: dns::UDP_BUFFER_SIZE,
+                udp_buffer_count: dns::UDP_BUFFER_COUNT,
+            };
+            let dns_server = Server::new(server_config, handler);
+            info!("Starting DNS server (tokio) on {}", cli.dns.dns_bind);
+            if let Err(e) = dns_server.run().await {
+                error!("Server error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Runtime::Monoio => {
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+
+            let (cold_tx, cold_rx) = flume::unbounded::<dns::mono::ColdRequest>();
+            for _ in 0..workers {
+                tokio::spawn(dns::mono::cold_path(cold_rx.clone(), handler.clone()));
+            }
+
+            dns::mono::spawn_workers(
+                cli.dns.dns_bind,
+                workers,
+                cache.clone(),
+                runtime_config.clone(),
+                analytics_producer.clone(),
+                cold_tx,
+            );
+
+            let tcp_handler = handler.clone();
+            let tcp_bind = cli.dns.dns_bind;
+            tokio::spawn(async move {
+                if let Err(e) = dns::serve_tcp(tcp_bind, tcp_handler).await {
+                    error!("TCP server error: {}", e);
+                }
+            });
+
+            info!(
+                "Starting DNS server on {} with {} workers",
+                cli.dns.dns_bind, workers
+            );
+            std::future::pending::<()>().await;
+        }
     }
 
     Ok(())

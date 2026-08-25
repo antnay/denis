@@ -116,6 +116,12 @@ impl Cache {
         decide(&block, &allow, name)
     }
 
+    pub async fn l1_get(&self, query: &Query) -> Option<Vec<u8>> {
+        let mut buf: heapless::String<128> = heapless::String::new();
+        self.query_key(&mut buf, query);
+        self.l1.get(buf.as_str()).await
+    }
+
     pub async fn check_and_get(
         &self,
         query: &Query,

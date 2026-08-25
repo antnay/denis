@@ -3,6 +3,10 @@ name = "dnsserver"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["analytics"]
+analytics = ["dep:rdkafka", "dep:clickhouse"]
+
 [profile.release]
 # debug = true
 opt-level = 3
@@ -21,6 +25,7 @@ arc-swap = "1.7"
 ahash = "0.8"
 memchr = "2.7"
 crossbeam-queue = "0.3"
+socket2 = { version = "0.5", features = ["all"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 redis = { version = "1.0.2", features = [
   "tokio-comp",
@@ -30,10 +35,21 @@ deadpool-redis = "0.22.1"
 ftlog = "0.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
-rdkafka = { version = "0.39", features = ["cmake-build"] }
-clickhouse = "0.12"
+rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
+clickhouse = { version = "0.12", optional = true }
+prometheus = "0.13"
 bytes = "1.11.0"
 heapless = "0.9.2"
 moka = { version = "0.12.13", features = ["future"] }
 tokio-stream = "0.1.18"
 axum = "0.7"
+flume = "0.11"
+
+[dev-dependencies]
+hdrhistogram = "7"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+monoio = { version = "0.2", features = ["iouring", "legacy", "macros", "sync"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+monoio = { version = "0.2", features = ["legacy", "macros", "sync"] }

@@ -26,14 +26,14 @@ enum ParseState {
 pub struct Parser {}
 
 impl Parser {
-    pub async fn parse_udp(data: &[u8]) -> Result<Query, ParseError> {
+    pub async fn parse_udp(data: Vec<u8>) -> Result<Query, ParseError> {
         if data.len() < HEADER {
             return Err(ParseError::TooShort(data.len()));
         }
 
-        let (qname, idx) = Parser::parse_question(data).await?;
+        let (qname, idx) = Parser::parse_question(&data).await?;
 
-        let qtype = Parser::parse_qtype(data, idx)?;
+        let qtype = Parser::parse_qtype(&data, idx)?;
         let answer_offset = idx + 5;
 
         let qname_str = String::from_utf8_lossy(&qname);
@@ -41,7 +41,7 @@ impl Parser {
         Ok(Query {
             name: qname_str.to_string(),
             query_type: hickory_proto::rr::RecordType::from(qtype),
-            raw: data.to_vec(),
+            raw: data,
             answer_offset,
         })
     }
@@ -130,7 +130,7 @@ mod tests {
 
     #[tokio::test]
     async fn parses_valid_query() {
-        let q = Parser::parse_udp(&query_packet("Ads.Example.COM"))
+        let q = Parser::parse_udp(query_packet("Ads.Example.COM"))
             .await
             .expect("valid packet parses");
         assert_eq!(q.name, "ads.example.com");
@@ -140,13 +140,13 @@ mod tests {
     #[tokio::test]
     async fn rejects_malformed_without_panicking() {
         assert!(matches!(
-            Parser::parse_udp(&[]).await,
+            Parser::parse_udp(Vec::new()).await,
             Err(ParseError::TooShort(0))
         ));
-        assert!(Parser::parse_udp(&[0u8; 5]).await.is_err());
+        assert!(Parser::parse_udp(vec![0u8; 5]).await.is_err());
         // Header only, no question and no root terminator -> Truncated.
         assert!(matches!(
-            Parser::parse_udp(&[0u8; HEADER]).await,
+            Parser::parse_udp(vec![0u8; HEADER]).await,
             Err(ParseError::Truncated)
         ));
 
@@ -154,7 +154,7 @@ mod tests {
         let mut p = vec![0u8; HEADER];
         p.extend_from_slice(&[10, b'a', b'b', b'c']);
         assert!(matches!(
-            Parser::parse_udp(&p).await,
+            Parser::parse_udp(p).await,
             Err(ParseError::Truncated)
         ));
 
@@ -162,7 +162,7 @@ mod tests {
         let mut p = vec![0u8; HEADER];
         p.extend_from_slice(&[3, b'a', b'b', b'c']);
         assert!(matches!(
-            Parser::parse_udp(&p).await,
+            Parser::parse_udp(p).await,
             Err(ParseError::Truncated)
         ));
 
@@ -170,7 +170,7 @@ mod tests {
         let mut p = vec![0u8; HEADER];
         p.extend_from_slice(&[0xC0, 0x0C]);
         assert!(matches!(
-            Parser::parse_udp(&p).await,
+            Parser::parse_udp(p).await,
             Err(ParseError::CompressionPointer)
         ));
 
@@ -178,7 +178,7 @@ mod tests {
         let mut p = vec![0u8; HEADER];
         p.extend_from_slice(&[0x41, b'a']);
         assert!(matches!(
-            Parser::parse_udp(&p).await,
+            Parser::parse_udp(p).await,
             Err(ParseError::LabelTooLong(0x41))
         ));
 
@@ -186,7 +186,7 @@ mod tests {
         let mut p = vec![0u8; HEADER];
         p.extend_from_slice(&[3, b'a', b'b', b'c', 0x00]); // name, no qtype
         assert!(matches!(
-            Parser::parse_udp(&p).await,
+            Parser::parse_udp(p).await,
             Err(ParseError::Truncated)
         ));
     }

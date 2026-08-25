@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::BytesMut;
 use ftlog::{error, info};
@@ -112,7 +112,7 @@ impl Server {
             buf.truncate(len);
 
             tokio::spawn(async move {
-                let result = handler.handle(&buf).await;
+                let result = handler.handle(buf.to_vec()).await;
                 pool.put(buf).await;
                 match result {
                     Ok(res) => {
@@ -145,6 +145,23 @@ impl Server {
     }
 }
 
+/// Standalone TCP DNS listener, for use when the datapath runs on monoio (UDP
+/// only) but TCP still needs serving on the tokio runtime.
+pub async fn serve_tcp(bind_addr: SocketAddr, handler: Arc<QueryHandler>) -> Result<(), ServerError> {
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| ServerError::BindTcp(bind_addr.to_string(), e))?;
+    loop {
+        let (stream, src) = listener.accept().await.map_err(ServerError::Socket)?;
+        let handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_conn(stream, handler).await {
+                error!("tcp connection error from {}: {}", src, e);
+            }
+        });
+    }
+}
+
 async fn handle_tcp_conn(
     mut stream: TcpStream,
     handler: Arc<QueryHandler>,
@@ -167,7 +184,7 @@ async fn handle_tcp_conn(
         let mut msg = vec![0u8; msg_len];
         stream.read_exact(&mut msg).await?;
 
-        match handler.handle(&msg).await {
+        match handler.handle(msg).await {
             Ok(response) => {
                 let resp_len = (response.len() as u16).to_be_bytes();
                 stream.write_all(&resp_len).await?;

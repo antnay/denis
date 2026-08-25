@@ -71,7 +71,7 @@ impl QueryHandler {
         }
     }
 
-    pub async fn handle(&self, data: &[u8]) -> Result<Vec<u8>, HandlerError> {
+    pub async fn handle(&self, data: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let total = Instant::now();
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -83,6 +83,15 @@ impl QueryHandler {
             info!("parse time: {:?}", total.elapsed());
         }
 
+        self.handle_parsed(query, total, timestamp_ms).await
+    }
+
+    pub async fn handle_parsed(
+        &self,
+        query: Query,
+        total: Instant,
+        timestamp_ms: u64,
+    ) -> Result<Vec<u8>, HandlerError> {
         let served = match self.cache.check_and_get(&query).await? {
             (true, _) => {
                 if cfg!(debug_assertions) {
