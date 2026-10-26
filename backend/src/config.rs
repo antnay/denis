@@ -5,9 +5,9 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use ftlog::info;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
 use crate::cli::Cli;
+use crate::db::{DbError, DbPool, QueryBuilder};
 
 pub type SharedConfig = Arc<ArcSwap<RuntimeConfig>>;
 
@@ -96,12 +96,11 @@ impl RuntimeConfigPatch {
     }
 }
 
-pub async fn pls_table(pool: &PgPool) -> Result<(), sqlx::Error> {
+pub async fn ensure_table(pool: &DbPool) -> Result<(), DbError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS settings (
-            id     INT PRIMARY KEY DEFAULT 1,
-            config JSONB NOT NULL,
-            CONSTRAINT settings_single_row CHECK (id = 1)
+            id     INTEGER PRIMARY KEY,
+            config TEXT NOT NULL
         )",
     )
     .execute(pool)
@@ -110,19 +109,19 @@ pub async fn pls_table(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 pub async fn load_or_init(
-    pool: &PgPool,
+    pool: &DbPool,
     defaults: RuntimeConfig,
-) -> Result<SharedConfig, sqlx::Error> {
-    pls_table(pool).await?;
+) -> Result<SharedConfig, DbError> {
+    ensure_table(pool).await?;
 
-    let existing: Option<serde_json::Value> =
+    let existing: Option<String> =
         sqlx::query_scalar("SELECT config FROM settings WHERE id = 1")
             .fetch_optional(pool)
             .await?;
 
-    let config = match existing.and_then(|v| serde_json::from_value::<RuntimeConfig>(v).ok()) {
+    let config = match existing.and_then(|s| serde_json::from_str::<RuntimeConfig>(&s).ok()) {
         Some(cfg) => {
-            info!("loaded runtime config from postgres");
+            info!("loaded runtime config from database");
             cfg
         }
         None => {
@@ -135,14 +134,13 @@ pub async fn load_or_init(
     Ok(Arc::new(ArcSwap::from_pointee(config)))
 }
 
-pub async fn persist(pool: &PgPool, config: &RuntimeConfig) -> Result<(), sqlx::Error> {
-    let json = serde_json::to_value(config).expect("RuntimeConfig serializes");
-    sqlx::query(
-        "INSERT INTO settings (id, config) VALUES (1, $1)
-         ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config",
-    )
-    .bind(json)
-    .execute(pool)
-    .await?;
+pub async fn persist(pool: &DbPool, config: &RuntimeConfig) -> Result<(), DbError> {
+    let json = serde_json::to_string(config).expect("RuntimeConfig serializes");
+    QueryBuilder::new("INSERT INTO settings (id, config) VALUES (1, ")
+        .push_bind(json)
+        .push(") ON CONFLICT (id) DO UPDATE SET config = excluded.config")
+        .build()
+        .execute(pool)
+        .await?;
     Ok(())
 }

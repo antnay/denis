@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["analytics"]
+default = ["sqlite"]
+# Database backend
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+# Optional L2 cache
+redis = ["dep:redis"]
+# Kafka -> ClickHouse
 analytics = ["dep:rdkafka", "dep:clickhouse"]
 
 [profile.release]
@@ -16,7 +22,7 @@ panic = "abort"
 strip = "symbols"
 
 [dependencies]
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio"] }
 tokio = { version = "1.49.0", features = ["full"] }
 hickory-proto = "0.25.2"
 thiserror = "2"
@@ -30,12 +36,12 @@ core_affinity = "0.8"
 rand = "0.8"
 argon2 = "0.5"
 sha2 = "0.10"
+ipnet = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 redis = { version = "1.0.2", features = [
   "tokio-comp",
   "tokio-native-tls-comp",
-] }
-deadpool-redis = "0.22.1"
+], optional = true }
 ftlog = "0.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"

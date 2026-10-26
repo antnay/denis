@@ -128,6 +128,7 @@ impl QueryHandler {
 
                 if let Some(ttl) = cache_ttl(&self.config.load(), &res.raw, query.answer_offset) {
                     self.cache.add_dns_query_moka(&query, &res.raw, ttl).await;
+                    #[cfg(feature = "redis")]
                     self.cache.add_dns_query_redis(&query, &res.raw, ttl).await;
                 }
                 Served {

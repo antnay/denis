@@ -18,56 +18,42 @@ use axum::{
 use ftlog::warn;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
 
 use super::{ApiError, ApiResponse, ApiState};
+use crate::db::{DbError, DbPool, ID_PK, QueryBuilder, now_unix};
+
+const SESSION_TTL: Duration = Duration::from_secs(86_400);
 
 pub struct Auth {
-    pool: PgPool,
-    /// Optional static token from env, for automation/bootstrap.
-    api_token: Option<String>,
-    ttl: Duration,
-    /// Login-issued session tokens: token -> expiry (in-memory; restart = re-login).
+    pool: DbPool,
     sessions: RwLock<HashMap<String, Instant>>,
 }
 
 impl Auth {
-    /// Create the auth tables, seed a bootstrap admin if the users table is
-    /// empty (env creds if given, else `admin`/`admin`), and return the handle.
-    pub async fn new(
-        pool: PgPool,
-        api_token: Option<String>,
-        ttl: Duration,
-        bootstrap_user: Option<String>,
-        bootstrap_password_hash: Option<String>,
-    ) -> Result<Arc<Self>, sqlx::Error> {
+    pub async fn new(pool: DbPool) -> Result<Arc<Self>, DbError> {
         ensure_schema(&pool).await?;
 
         let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
             .fetch_one(&pool)
             .await?;
         if users == 0 {
-            let user = bootstrap_user.unwrap_or_else(|| "admin".to_string());
-            let (hash, is_default) = match bootstrap_password_hash {
-                Some(h) => (h, false),
-                None => (Self::hash_password("admin"), true),
-            };
-            sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
-                .bind(&user)
-                .bind(&hash)
+            QueryBuilder::new("INSERT INTO users (username, password_hash, created_at) ")
+                .push_values(
+                    [("admin", Self::hash_password("admin"))],
+                    |mut b, (u, h)| {
+                        b.push_bind(u).push_bind(h).push_bind(now_unix());
+                    },
+                )
+                .build()
                 .execute(&pool)
                 .await?;
-            if is_default {
-                warn!("seeded default admin user '{user}' with password 'admin' — change it via PATCH /users/{user}/password");
-            } else {
-                warn!("seeded bootstrap admin user '{user}'");
-            }
+            warn!(
+                "seeded default admin/admin — change it via PATCH /users/admin/password (or create your own user and delete admin)"
+            );
         }
 
         Ok(Arc::new(Self {
             pool,
-            api_token,
-            ttl,
             sessions: RwLock::new(HashMap::new()),
         }))
     }
@@ -81,18 +67,22 @@ impl Auth {
     }
 
     async fn login(&self, user: &str, pass: &str) -> Option<(String, u64)> {
-        let row = sqlx::query("SELECT id, password_hash FROM users WHERE username = $1")
-            .bind(user)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()??;
-        let id: i64 = row.get("id");
-        let hash: String = row.get("password_hash");
+        let row: Option<(i64, String)> =
+            QueryBuilder::new("SELECT id, password_hash FROM users WHERE username = ")
+                .push_bind(user)
+                .build_query_as()
+                .fetch_optional(&self.pool)
+                .await
+                .ok()?;
+        let (id, hash) = row?;
         if !verify(pass, &hash) {
             return None;
         }
-        let _ = sqlx::query("UPDATE users SET last_login = now() WHERE id = $1")
-            .bind(id)
+        let _ = QueryBuilder::new("UPDATE users SET last_login = ")
+            .push_bind(now_unix())
+            .push(" WHERE id = ")
+            .push_bind(id)
+            .build()
             .execute(&self.pool)
             .await;
 
@@ -100,16 +90,11 @@ impl Auth {
         self.sessions
             .write()
             .unwrap()
-            .insert(token.clone(), Instant::now() + self.ttl);
-        Some((token, self.ttl.as_secs()))
+            .insert(token.clone(), Instant::now() + SESSION_TTL);
+        Some((token, SESSION_TTL.as_secs()))
     }
 
     async fn validate(&self, token: &str) -> bool {
-        if let Some(t) = &self.api_token {
-            if ct_eq(token, t) {
-                return true;
-            }
-        }
         {
             let mut sessions = self.sessions.write().unwrap();
             match sessions.get(token) {
@@ -120,20 +105,23 @@ impl Auth {
                 None => {}
             }
         }
-        // DB-backed API tokens are stored as SHA-256 hashes.
         let hash = sha256_hex(token);
-        let id: Option<i64> = sqlx::query_scalar(
-            "SELECT id FROM api_tokens
-             WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())",
-        )
-        .bind(&hash)
-        .fetch_optional(&self.pool)
-        .await
-        .ok()
-        .flatten();
+        let id: Option<i64> = QueryBuilder::new("SELECT id FROM api_tokens WHERE token_hash = ")
+            .push_bind(hash)
+            .push(" AND (expires_at IS NULL OR expires_at > ")
+            .push_bind(now_unix())
+            .push(")")
+            .build_query_scalar()
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
         if let Some(id) = id {
-            let _ = sqlx::query("UPDATE api_tokens SET last_used = now() WHERE id = $1")
-                .bind(id)
+            let _ = QueryBuilder::new("UPDATE api_tokens SET last_used = ")
+                .push_bind(now_unix())
+                .push(" WHERE id = ")
+                .push_bind(id)
+                .build()
                 .execute(&self.pool)
                 .await;
             return true;
@@ -141,118 +129,119 @@ impl Auth {
         false
     }
 
-    async fn list_users(&self) -> Result<Vec<UserInfo>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT username, created_at::text AS created_at, last_login::text AS last_login
-             FROM users ORDER BY username",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    async fn list_users(&self) -> Result<Vec<UserInfo>, DbError> {
+        let rows: Vec<(String, i64, Option<i64>)> =
+            sqlx::query_as("SELECT username, created_at, last_login FROM users ORDER BY username")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows
             .into_iter()
-            .map(|r| UserInfo {
-                username: r.get("username"),
-                created_at: r.get("created_at"),
-                last_login: r.get("last_login"),
+            .map(|(username, created_at, last_login)| UserInfo {
+                username,
+                created_at,
+                last_login,
             })
             .collect())
     }
 
-    async fn create_user(&self, user: &str, pass: &str) -> Result<(), sqlx::Error> {
-        let hash = Self::hash_password(pass);
-        sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
-            .bind(user)
-            .bind(&hash)
+    async fn create_user(&self, user: &str, pass: &str) -> Result<(), DbError> {
+        QueryBuilder::new("INSERT INTO users (username, password_hash, created_at) ")
+            .push_values([(user, Self::hash_password(pass))], |mut b, (u, h)| {
+                b.push_bind(u).push_bind(h).push_bind(now_unix());
+            })
+            .build()
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    async fn set_password(&self, user: &str, pass: &str) -> Result<bool, sqlx::Error> {
-        let hash = Self::hash_password(pass);
-        let res = sqlx::query("UPDATE users SET password_hash = $1 WHERE username = $2")
-            .bind(&hash)
-            .bind(user)
+    async fn set_password(&self, user: &str, pass: &str) -> Result<bool, DbError> {
+        let res = QueryBuilder::new("UPDATE users SET password_hash = ")
+            .push_bind(Self::hash_password(pass))
+            .push(" WHERE username = ")
+            .push_bind(user)
+            .build()
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected() > 0)
     }
 
-    async fn delete_user(&self, user: &str) -> Result<bool, sqlx::Error> {
-        let res = sqlx::query("DELETE FROM users WHERE username = $1")
-            .bind(user)
+    async fn delete_user(&self, user: &str) -> Result<bool, DbError> {
+        let res = QueryBuilder::new("DELETE FROM users WHERE username = ")
+            .push_bind(user)
+            .build()
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected() > 0)
     }
 
-    async fn create_token(&self, name: &str, ttl_secs: Option<i64>) -> Result<String, sqlx::Error> {
+    async fn create_token(&self, name: &str, ttl_secs: Option<i64>) -> Result<String, DbError> {
         let token = random_token();
         let hash = sha256_hex(&token);
-        sqlx::query(
-            "INSERT INTO api_tokens (name, token_hash, expires_at)
-             VALUES ($1, $2, CASE WHEN $3::bigint IS NULL THEN NULL
-                                  ELSE now() + ($3 * interval '1 second') END)",
-        )
-        .bind(name)
-        .bind(&hash)
-        .bind(ttl_secs)
-        .execute(&self.pool)
-        .await?;
+        let expires_at = ttl_secs.map(|t| now_unix() + t);
+        QueryBuilder::new("INSERT INTO api_tokens (name, token_hash, created_at, expires_at) ")
+            .push_values(
+                [(name, hash, now_unix(), expires_at)],
+                |mut b, (n, h, c, e)| {
+                    b.push_bind(n).push_bind(h).push_bind(c).push_bind(e);
+                },
+            )
+            .build()
+            .execute(&self.pool)
+            .await?;
         Ok(token)
     }
 
-    async fn list_tokens(&self) -> Result<Vec<TokenInfo>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, name, created_at::text AS created_at,
-                    last_used::text AS last_used, expires_at::text AS expires_at
-             FROM api_tokens ORDER BY id",
+    async fn list_tokens(&self) -> Result<Vec<TokenInfo>, DbError> {
+        let rows: Vec<(i64, String, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT id, name, created_at, last_used, expires_at FROM api_tokens ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .into_iter()
-            .map(|r| TokenInfo {
-                id: r.get("id"),
-                name: r.get("name"),
-                created_at: r.get("created_at"),
-                last_used: r.get("last_used"),
-                expires_at: r.get("expires_at"),
+            .map(|(id, name, created_at, last_used, expires_at)| TokenInfo {
+                id,
+                name,
+                created_at,
+                last_used,
+                expires_at,
             })
             .collect())
     }
 
-    async fn revoke_token(&self, id: i64) -> Result<bool, sqlx::Error> {
-        let res = sqlx::query("DELETE FROM api_tokens WHERE id = $1")
-            .bind(id)
+    async fn revoke_token(&self, id: i64) -> Result<bool, DbError> {
+        let res = QueryBuilder::new("DELETE FROM api_tokens WHERE id = ")
+            .push_bind(id)
+            .build()
             .execute(&self.pool)
             .await?;
         Ok(res.rows_affected() > 0)
     }
 }
 
-async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
+async fn ensure_schema(pool: &DbPool) -> Result<(), DbError> {
+    sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS users (
-            id            BIGSERIAL PRIMARY KEY,
-            username      VARCHAR(64) NOT NULL UNIQUE,
+            id            {ID_PK},
+            username      TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-            last_login    TIMESTAMPTZ
-        )",
-    )
+            created_at    BIGINT NOT NULL,
+            last_login    BIGINT
+        )"
+    ))
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query(&format!(
         "CREATE TABLE IF NOT EXISTS api_tokens (
-            id         BIGSERIAL PRIMARY KEY,
-            name       VARCHAR(128) NOT NULL,
-            token_hash CHAR(64) NOT NULL UNIQUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            last_used  TIMESTAMPTZ,
-            expires_at TIMESTAMPTZ
-        )",
-    )
+            id         {ID_PK},
+            name       TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at BIGINT NOT NULL,
+            last_used  BIGINT,
+            expires_at BIGINT
+        )"
+    ))
     .execute(pool)
     .await?;
     Ok(())
@@ -286,8 +275,8 @@ pub struct PasswordReq {
 #[derive(Serialize)]
 pub struct UserInfo {
     username: String,
-    created_at: Option<String>,
-    last_login: Option<String>,
+    created_at: i64,
+    last_login: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -305,9 +294,9 @@ pub struct TokenCreated {
 pub struct TokenInfo {
     id: i64,
     name: String,
-    created_at: Option<String>,
-    last_used: Option<String>,
-    expires_at: Option<String>,
+    created_at: i64,
+    last_used: Option<i64>,
+    expires_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -323,7 +312,10 @@ pub async fn login(
 ) -> Result<Json<ApiResponse<LoginResp>>, ApiError> {
     match s.auth.login(&req.username, &req.password).await {
         Some((token, expires_in)) => Ok(ApiResponse::ok(LoginResp { token, expires_in })),
-        None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "invalid credentials")),
+        None => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid credentials",
+        )),
     }
 }
 
@@ -443,16 +435,4 @@ fn random_token() -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
-}
-
-fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }

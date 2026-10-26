@@ -1,15 +1,15 @@
+mod acl;
 mod analytics;
 mod api;
 mod cli;
 mod config;
+mod db;
 mod dns;
 mod handler;
 mod repo;
 
 use clap::Parser;
 use ftlog::{LevelFilter, error, info};
-use redis::Client;
-use sqlx::postgres;
 use std::sync::Arc;
 
 use crate::{
@@ -27,11 +27,6 @@ use crate::analytics::{AnalyticsConsumer, StatsClient};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-
-    if let Some(pw) = cli.auth.hash_password.as_deref() {
-        println!("{}", api::Auth::hash_password(pw));
-        return Ok(());
-    }
 
     let level = match cli.verbose {
         0 => LevelFilter::Info,
@@ -88,43 +83,24 @@ async fn run(
     cli: Cli,
     dp_pins: Vec<Option<core_affinity::CoreId>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let rds_conn = Client::open(cli.redis.redis_url.clone())
-        .expect("Cannot connect to redis")
+    let pool = db::connect(&cli.database.database_url, cli.database.max_connections)
+        .await
+        .expect("cannot connect to database");
+
+    repo::ensure_tables(&pool)
+        .await
+        .expect("failed to create blocklist/allowlist tables");
+    let acl = acl::Acl::load(&pool)
+        .await
+        .expect("failed to load access control list");
+
+    #[cfg(feature = "redis")]
+    let rds_conn = redis::Client::open(cli.redis.redis_url.clone())
+        .expect("cannot open redis client")
         .get_multiplexed_async_connection()
         .await?;
 
-    let pg_pool = postgres::PgPoolOptions::new()
-        .max_connections(cli.postgres.pg_max_connections)
-        .connect(&cli.postgres.database_url)
-        .await
-        .expect("Cannot connect to postgres");
-
-    sqlx::query(
-        "
-        CREATE TABLE IF NOT EXISTS allowed (
-            id SERIAL PRIMARY KEY,
-            domain VARCHAR(253) NOT NULL UNIQUE
-        )
-        ",
-    )
-    .execute(&pg_pool)
-    .await
-    .expect("failed to create allowed table");
-
-    sqlx::query(
-        "
-        CREATE TABLE IF NOT EXISTS blocked (
-            id SERIAL PRIMARY KEY,
-            list VARCHAR(50),
-            domain VARCHAR(253) NOT NULL UNIQUE
-        )
-        ",
-    )
-    .execute(&pg_pool)
-    .await
-    .expect("failed to create blocked table");
-
-    let runtime_config = config::load_or_init(&pg_pool, RuntimeConfig::from_cli(&cli))
+    let runtime_config = config::load_or_init(&pool, RuntimeConfig::from_cli(&cli))
         .await
         .expect("failed to load runtime config");
 
@@ -153,7 +129,12 @@ async fn run(
         tokio::spawn(analytics_consumer.run());
     }
 
-    let cache = Arc::new(Cache::new(rds_conn, pg_pool, cli.redis.cache_capacity));
+    let cache = Arc::new(Cache::new(
+        #[cfg(feature = "redis")]
+        rds_conn,
+        pool,
+        cli.redis.cache_capacity,
+    ));
     cache.read_blocklist_db_memory().await;
     cache.read_allowlist_db_memory().await;
 
@@ -174,21 +155,9 @@ async fn run(
             &cli.clickhouse.clickhouse_password,
         ))
     });
-    let bootstrap_hash = cli.auth.admin_password_hash.clone().or_else(|| {
-        cli.auth
-            .admin_password
-            .as_deref()
-            .map(api::Auth::hash_password)
-    });
-    let auth = api::Auth::new(
-        cache.pool().clone(),
-        cli.auth.api_token.clone(),
-        std::time::Duration::from_secs(cli.auth.auth_ttl_secs),
-        cli.auth.admin_user.clone(),
-        bootstrap_hash,
-    )
-    .await
-    .expect("failed to init auth");
+    let auth = api::Auth::new(cache.pool().clone())
+        .await
+        .expect("failed to init auth");
     let api_router = api::router(ApiState {
         cache: cache.clone(),
         #[cfg(feature = "analytics")]
@@ -236,6 +205,7 @@ async fn run(
                 cache.clone(),
                 runtime_config.clone(),
                 analytics_producer.clone(),
+                acl.clone(),
                 cold_tx,
             );
 

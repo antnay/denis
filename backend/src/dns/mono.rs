@@ -10,8 +10,9 @@ use monoio::net::udp::UdpSocket;
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::{
+    acl::{Acl, Action},
     analytics::{AnalyticsProducer, DnsQueryEvent},
-    config::SharedConfig,
+    config::{BlockingMode, SharedConfig},
     handler::{Parser, Query, UpstreamResponse, rcode_from_raw},
     repo::Cache,
 };
@@ -29,28 +30,31 @@ struct Worker {
     cache: Arc<Cache>,
     config: SharedConfig,
     analytics: Arc<AnalyticsProducer>,
+    acl: Arc<Acl>,
     cold: flume::Sender<ColdRequest>,
 }
 
 pub fn spawn_workers(
     addr: SocketAddr,
-    pins: Vec<Option<core_affinity::CoreId>>,
+    cores: Vec<Option<core_affinity::CoreId>>,
     cache: Arc<Cache>,
     config: SharedConfig,
     analytics: Arc<AnalyticsProducer>,
+    acl: Arc<Acl>,
     cold: flume::Sender<ColdRequest>,
 ) {
-    for (id, pin) in pins.into_iter().enumerate() {
+    for (id, core) in cores.into_iter().enumerate() {
         let worker = Worker {
             cache: cache.clone(),
             config: config.clone(),
             analytics: analytics.clone(),
+            acl: acl.clone(),
             cold: cold.clone(),
         };
         std::thread::Builder::new()
             .name(format!("monoio-{id}"))
             .spawn(move || {
-                if let Some(core) = pin {
+                if let Some(core) = core {
                     core_affinity::set_for_current(core);
                 }
                 let std_sock = match bind_reuseport(addr) {
@@ -101,9 +105,20 @@ impl Worker {
             };
             buf.truncate(len);
 
-            // Hot path (blocked / L1 hit) runs inline on this core — no task
-            // spawn, run-to-completion. Only a cache miss, which must await the
-            // tokio cold path, is spawned so it doesn't stall recv.
+            match this.acl.decide(src.ip()) {
+                Action::Allow => {}
+                Action::Deny => continue,
+                Action::Refuse => {
+                    if let Some(resp) = this.refuse(buf).await {
+                        let (r, _) = socket.send_to(resp, src).await;
+                        if let Err(e) = r {
+                            error!("monoio send: {e}");
+                        }
+                    }
+                    continue;
+                }
+            }
+
             match this.classify(buf).await {
                 Outcome::Reply(resp) => {
                     let (r, _) = socket.send_to(resp, src).await;
@@ -188,6 +203,11 @@ impl Worker {
         }
     }
 
+    async fn refuse(&self, packet: Vec<u8>) -> Option<Vec<u8>> {
+        let query = Parser::parse_udp(packet).await.ok()?;
+        Some(UpstreamResponse::blocked(&query, BlockingMode::Refused).raw)
+    }
+
     async fn serve_miss(&self, query: Query, total: Instant, timestamp_ms: u64) -> Option<Vec<u8>> {
         let (tx, rx) = flume::bounded(1);
         self.cold
@@ -213,7 +233,10 @@ enum Outcome {
     Drop,
 }
 
-pub async fn cold_path(rx: flume::Receiver<ColdRequest>, handler: Arc<crate::handler::QueryHandler>) {
+pub async fn cold_path(
+    rx: flume::Receiver<ColdRequest>,
+    handler: Arc<crate::handler::QueryHandler>,
+) {
     while let Ok(req) = rx.recv_async().await {
         let handler = handler.clone();
         tokio::spawn(async move {

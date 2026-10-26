@@ -24,7 +24,6 @@ pub enum ServerError {
     Socket(std::io::Error),
 }
 
-// todo: use disruptor
 #[derive(Debug)]
 pub struct BufferPool {
     pool: Mutex<Vec<BytesMut>>,

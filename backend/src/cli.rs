@@ -20,49 +20,17 @@ pub struct Cli {
     #[command(flatten)]
     pub redis: RedisArgs,
     #[command(flatten)]
-    pub postgres: PostgresArgs,
+    pub database: DatabaseArgs,
     #[command(flatten)]
     pub kafka: KafkaArgs,
     #[command(flatten)]
     pub clickhouse: ClickhouseArgs,
     #[command(flatten)]
     pub analytics: AnalyticsArgs,
-    #[command(flatten)]
-    pub auth: AuthArgs,
 
     /// Increase log verbosity: -v = debug, -vv = trace.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
-}
-
-#[derive(Args, Debug)]
-#[command(next_help_heading = "Management API auth")]
-pub struct AuthArgs {
-    /// Admin username for POST /auth/login. Auth is enforced once this and
-    /// --admin-password (or --api-token) are set; otherwise the API is open.
-    #[arg(long, env = "DENIS_ADMIN_USER")]
-    pub admin_user: Option<String>,
-
-    /// Plaintext admin password
-    /// #[arg(long, env = "DENIS_ADMIN_PASSWORD")]
-    pub admin_password: Option<String>,
-
-    /// Pre-computed argon2 PHC hash (preferred over --admin-password). Generate
-    /// one with `denis --hash-password <PW>`.
-    #[arg(long, env = "DENIS_ADMIN_PASSWORD_HASH")]
-    pub admin_password_hash: Option<String>,
-
-    /// Static long-lived bearer token (alternative to login).
-    #[arg(long, env = "DENIS_API_TOKEN")]
-    pub api_token: Option<String>,
-
-    /// Lifetime of a login-issued session token, in seconds.
-    #[arg(long, env = "DENIS_AUTH_TTL_SECS", default_value_t = 86_400)]
-    pub auth_ttl_secs: u64,
-
-    /// Print an argon2 hash of the given password and exit.
-    #[arg(long)]
-    pub hash_password: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -146,17 +114,14 @@ pub struct RedisArgs {
 }
 
 #[derive(Args, Debug)]
-#[command(next_help_heading = "PostgreSQL")]
-pub struct PostgresArgs {
-    #[arg(
-        long,
-        env = "DATABASE_URL",
-        default_value = "postgres://postgres:postgres@localhost:5433/denis"
-    )]
+#[command(next_help_heading = "Database")]
+pub struct DatabaseArgs {
+    /// SQLite path (default) or Postgres URL when built with `--features postgres`.
+    #[arg(long, env = "DATABASE_URL", default_value = "sqlite://denis.db")]
     pub database_url: String,
 
-    #[arg(long, env = "DENIS_PG_MAX_CONNECTIONS", default_value_t = 16)]
-    pub pg_max_connections: u32,
+    #[arg(long, env = "DENIS_DB_MAX_CONNECTIONS", default_value_t = 16)]
+    pub max_connections: u32,
 }
 
 #[derive(Args, Debug)]

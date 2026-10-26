@@ -220,7 +220,6 @@ fn fetch_kafka_stats_sync(brokers: &str) -> KafkaStats {
 
     let num_partitions = topic_meta.partitions().len() as i32;
 
-    // Assign all partitions so committed() returns offsets for this group.
     let mut tpl = rdkafka::topic_partition_list::TopicPartitionList::new();
     for p in topic_meta.partitions() {
         tpl.add_partition(TOPIC, p.id());

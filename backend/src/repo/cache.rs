@@ -2,9 +2,7 @@ use ahash::RandomState;
 use arc_swap::ArcSwap;
 use core::fmt::Write;
 use ftlog::debug;
-use redis::RedisError;
 use serde::Serialize;
-use sqlx::{PgPool, Row, postgres::PgRow};
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -12,28 +10,18 @@ use std::{
 };
 use tokio_stream::StreamExt;
 
+use crate::db::{DbError, DbPool, QueryBuilder};
 use crate::handler::Query;
 
 type DomainSet = HashSet<String, RandomState>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CacheError {
+    #[cfg(feature = "redis")]
     #[error("cache redis: {0}")]
-    Redis(RedisError),
+    Redis(#[from] redis::RedisError),
     #[error("cache sql: {0}")]
-    Sql(sqlx::Error),
-}
-
-impl From<sqlx::Error> for CacheError {
-    fn from(err: sqlx::Error) -> Self {
-        CacheError::Sql(err)
-    }
-}
-
-impl From<redis::RedisError> for CacheError {
-    fn from(err: redis::RedisError) -> Self {
-        CacheError::Redis(err)
-    }
+    Sql(#[from] sqlx::Error),
 }
 
 #[derive(Serialize)]
@@ -49,11 +37,8 @@ pub struct AddOutcome {
     pub considered: usize,
 }
 
-// SQL max insertion per transaction
-const INSERT_CHUNK: usize = 5_000;
+const MAX_INSERT_CHUNK: usize = 1_000;
 
-/// L1 value: the raw response (as `Arc<[u8]>` so a cache hit clones a refcount,
-/// not the bytes) plus its DNS TTL for per-entry expiry (see [`TtlExpiry`]).
 #[derive(Clone)]
 struct L1Entry {
     raw: Arc<[u8]>,
@@ -88,14 +73,15 @@ pub struct Cache {
     allow_list: ArcSwap<DomainSet>,
     block_list: ArcSwap<DomainSet>,
     write_lock: Mutex<()>,
+    #[cfg(feature = "redis")]
     rds_conn: redis::aio::MultiplexedConnection,
-    pg_pool: PgPool,
+    pool: DbPool,
 }
 
 impl Cache {
     pub fn new(
-        rds_conn: redis::aio::MultiplexedConnection,
-        pg_pool: PgPool,
+        #[cfg(feature = "redis")] rds_conn: redis::aio::MultiplexedConnection,
+        pool: DbPool,
         l1_capacity: u64,
     ) -> Self {
         Self {
@@ -106,15 +92,17 @@ impl Cache {
             allow_list: ArcSwap::from_pointee(DomainSet::default()),
             block_list: ArcSwap::from_pointee(DomainSet::default()),
             write_lock: Mutex::new(()),
+            #[cfg(feature = "redis")]
             rds_conn,
-            pg_pool,
+            pool,
         }
     }
 
-    pub fn pool(&self) -> &PgPool {
-        &self.pg_pool
+    pub fn pool(&self) -> &DbPool {
+        &self.pool
     }
 
+    #[cfg(feature = "redis")]
     pub async fn add_dns_query_redis(&self, query: &Query, response: &[u8], ttl: u32) {
         if ttl == 0 {
             return;
@@ -180,12 +168,17 @@ impl Cache {
             return Ok((false, Some(entry.raw)));
         }
 
-        let mut conn = self.rds_conn.clone();
-        let res = redis::cmd("GET")
-            .arg(buf.as_str())
-            .query_async::<Option<Vec<u8>>>(&mut conn)
-            .await?;
-        Ok((false, res.map(Arc::from)))
+        #[cfg(feature = "redis")]
+        {
+            let mut conn = self.rds_conn.clone();
+            let res = redis::cmd("GET")
+                .arg(buf.as_str())
+                .query_async::<Option<Vec<u8>>>(&mut conn)
+                .await?;
+            return Ok((false, res.map(Arc::from)));
+        }
+        #[cfg(not(feature = "redis"))]
+        Ok((false, None))
     }
 
     #[inline]
@@ -223,17 +216,13 @@ impl Cache {
         self.cow_insert(&self.block_list, &valid);
 
         let mut added = 0usize;
-        for chunk in valid.chunks(INSERT_CHUNK) {
-            let res = sqlx::query(
-                "INSERT INTO blocked (list, domain)
-                 SELECT $1, * FROM UNNEST($2::text[])
-                 ON CONFLICT (domain) DO NOTHING",
-            )
-            .bind(list)
-            .bind(chunk)
-            .execute(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)?;
+        for chunk in valid.chunks(MAX_INSERT_CHUNK) {
+            let mut qb = QueryBuilder::new("INSERT INTO blocked (list, domain) ");
+            qb.push_values(chunk, |mut b, domain| {
+                b.push_bind(list).push_bind(domain);
+            });
+            qb.push(" ON CONFLICT (domain) DO NOTHING");
+            let res = qb.build().execute(&self.pool).await?;
             added += res.rows_affected() as usize;
         }
 
@@ -257,16 +246,13 @@ impl Cache {
         self.cow_insert(&self.allow_list, &valid);
 
         let mut added = 0usize;
-        for chunk in valid.chunks(INSERT_CHUNK) {
-            let res = sqlx::query(
-                "INSERT INTO allowed (domain)
-                 SELECT * FROM UNNEST($1::text[])
-                 ON CONFLICT (domain) DO NOTHING",
-            )
-            .bind(chunk)
-            .execute(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)?;
+        for chunk in valid.chunks(MAX_INSERT_CHUNK) {
+            let mut qb = QueryBuilder::new("INSERT INTO allowed (domain) ");
+            qb.push_values(chunk, |mut b, domain| {
+                b.push_bind(domain);
+            });
+            qb.push(" ON CONFLICT (domain) DO NOTHING");
+            let res = qb.build().execute(&self.pool).await?;
             added += res.rows_affected() as usize;
         }
 
@@ -286,11 +272,11 @@ impl Cache {
             removed
         };
 
-        sqlx::query("DELETE FROM blocked WHERE domain = $1")
-            .bind(&lower)
-            .execute(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)?;
+        QueryBuilder::new("DELETE FROM blocked WHERE domain = ")
+            .push_bind(&lower)
+            .build()
+            .execute(&self.pool)
+            .await?;
 
         Ok(removed)
     }
@@ -310,21 +296,13 @@ impl Cache {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<String>, CacheError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT domain FROM blocked ORDER BY domain LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pg_pool)
-        .await
-        .map_err(CacheError::Sql)
+        Ok(page_domains(&self.pool, "blocked", limit, offset).await?)
     }
 
     pub async fn count_block_domains(&self) -> Result<i64, CacheError> {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM blocked")
-            .fetch_one(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)
+        Ok(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM blocked")
+            .fetch_one(&self.pool)
+            .await?)
     }
 
     pub async fn list_allow_domains(
@@ -332,21 +310,13 @@ impl Cache {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<String>, CacheError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT domain FROM allowed ORDER BY domain LIMIT $1 OFFSET $2",
-        )
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pg_pool)
-        .await
-        .map_err(CacheError::Sql)
+        Ok(page_domains(&self.pool, "allowed", limit, offset).await?)
     }
 
     pub async fn count_allow_domains(&self) -> Result<i64, CacheError> {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM allowed")
-            .fetch_one(&self.pg_pool)
-            .await
-            .map_err(CacheError::Sql)
+        Ok(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM allowed")
+            .fetch_one(&self.pool)
+            .await?)
     }
 
     pub async fn stats(&self) -> CacheStats {
@@ -358,24 +328,56 @@ impl Cache {
     }
 
     pub async fn read_blocklist_db_memory(&self) {
-        let set = load_set(&self.pg_pool, "blocked").await;
+        let set = load_set(&self.pool, "blocked").await;
         self.block_list.store(Arc::new(set));
     }
 
     pub async fn read_allowlist_db_memory(&self) {
-        let set = load_set(&self.pg_pool, "allowed").await;
+        let set = load_set(&self.pool, "allowed").await;
         self.allow_list.store(Arc::new(set));
     }
 }
 
-async fn load_set(pool: &PgPool, table: &str) -> DomainSet {
+pub async fn ensure_tables(pool: &DbPool) -> Result<(), DbError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS blocked (
+            list   TEXT NOT NULL,
+            domain TEXT PRIMARY KEY
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS allowed (
+            domain TEXT PRIMARY KEY
+        )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn page_domains(
+    pool: &DbPool,
+    table: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<String>, sqlx::Error> {
+    QueryBuilder::new(format!("SELECT domain FROM {table} ORDER BY domain LIMIT "))
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset)
+        .build_query_scalar()
+        .fetch_all(pool)
+        .await
+}
+
+async fn load_set(pool: &DbPool, table: &str) -> DomainSet {
     let mut local = DomainSet::default();
     let query = format!("SELECT domain FROM {table}");
-    let mut stream = sqlx::query(&query)
-        .map(|row: PgRow| row.try_get::<String, _>("domain").ok())
-        .fetch(pool);
+    let mut stream = sqlx::query_scalar::<_, String>(&query).fetch(pool);
 
-    while let Some(Ok(Some(domain))) = stream.next().await {
+    while let Some(Ok(domain)) = stream.next().await {
         local.insert(domain);
     }
     local

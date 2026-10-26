@@ -94,8 +94,6 @@ struct Page<T> {
     offset: usize,
 }
 
-/// Uniform envelope for every JSON response (success and error).
-/// `/metrics` is the only exception — it must emit Prometheus text format.
 #[derive(Serialize)]
 pub(crate) struct ApiResponse<T> {
     success: bool,
@@ -152,13 +150,11 @@ impl axum::response::IntoResponse for ApiError {
 type ApiResult<T> = Result<Json<ApiResponse<T>>, ApiError>;
 
 pub fn router(state: ApiState) -> Router {
-    // Public: no auth (Prometheus scrape, health checks, obtaining a token).
     let public = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/auth/login", post(auth::login));
 
-    // Protected: everything that reads or mutates management state.
     #[allow(unused_mut)]
     let mut protected = Router::new()
         .route("/blocklist", get(list_blocked))
@@ -193,7 +189,6 @@ pub fn router(state: ApiState) -> Router {
     public.merge(protected).with_state(state)
 }
 
-/// Prometheus scrape endpoint. Sink gauges are sampled here at scrape time.
 async fn metrics(State(s): State<ApiState>) -> axum::response::Response {
     use axum::response::IntoResponse;
     match &s.metrics {
@@ -255,7 +250,6 @@ async fn health(State(s): State<ApiState>) -> Json<ApiResponse<HealthData>> {
     })
 }
 
-// ── Blocklist ─────────────────────────────────────────────────────────────
 
 async fn list_blocked(
     State(s): State<ApiState>,
@@ -296,7 +290,7 @@ async fn block_add_bulk(
     Ok(ApiResponse::ok(AddResult::from_outcome(outcome, total)))
 }
 
-/// Download a blocklist (hosts-file or domain-per-line) and import it.
+/// add blocklist from URL
 async fn block_add_url(
     State(s): State<ApiState>,
     Json(req): Json<AddUrlReq>,
@@ -321,7 +315,6 @@ async fn block_add_url(
     Ok(ApiResponse::ok(AddResult::from_outcome(outcome, total)))
 }
 
-// ── Allowlist ─────────────────────────────────────────────────────────────
 
 async fn list_allowed(
     State(s): State<ApiState>,
